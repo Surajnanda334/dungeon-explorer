@@ -47,6 +47,20 @@ const TILE_FLOOR  = 1;
 const TILE_WALL   = 2;
 const TILE_CORR   = 3;
 
+// Perk definitions for super chest selection
+const PERK_DEFS = {
+  DMG      : { name:'+8% DAMAGE',    color:'#ff4400', icon:'D+' },
+  CRIT     : { name:'+5% CRIT',      color:'#ffaa00', icon:'CR' },
+  FIRERATE : { name:'+10% FIRERATE', color:'#00ffff', icon:'FR' },
+  MAXHP    : { name:'+12% MAX HP',   color:'#ff4488', icon:'HP' },
+  RESIST   : { name:'+10% RESIST',   color:'#4488ff', icon:'RS' },
+  POTION   : { name:'+1 POTION',     color:'#ff88ff', icon:'PT' },
+  LIFESTEAL: { name:'5% LIFESTEAL',  color:'#ff0066', icon:'LS' },
+  SPEED    : { name:'+8% SPEED',     color:'#ffff00', icon:'SP' },
+  DASHCD   : { name:'-10% DASH CD',  color:'#00ff88', icon:'DC' },
+  RELOAD   : { name:'+10% RELOAD',   color:'#88ff00', icon:'RL' },
+};
+
 const ROOM_SPAWN  = 'spawn';
 const ROOM_EXIT   = 'exit';
 const ROOM_COMBAT = 'combat';
@@ -446,31 +460,76 @@ class Crate {
   _break(game) {
     this.alive = false;
     game.camera.shake(3, 0.15);
-    
-    // Large wood burst
-    game.particles.burst(this.x, this.y, 15, { 
-      color: '#8b5a2b', type: 'dot', speed: 120, life: 0.6, size: 5, drag: 0.88 
-    });
+    // Wood burst
+    game.particles.burst(this.x, this.y, 15, { color: '#8b5a2b', type: 'dot', speed: 120, life: 0.6, size: 5, drag: 0.88 });
+    // Gold sparkle indicating rarity
+    game.particles.burst(this.x, this.y, 18, { color: '#ffcc44', type: 'glow', speed: 100, life: 0.7, size: 7 });
 
-    // Random drop
-    const r = Math.random();
-    let type = '';
-    let opts = {};
-    
-    if (r < 0.40) { // Ammo 40%
-      type = 'AMMO';
-      const aTypes = ['PISTOL', 'SHOTGUN', 'SMG'];
-      opts.ammoType = game.rng.pick(aTypes);
-      opts.ammoAmount = opts.ammoType === 'SHOTGUN' ? 4 : opts.ammoType === 'SMG' ? 30 : 15;
-    } else if (r < 0.65) { // Health 25%
-      type = 'POTION';
-    } else if (r < 0.85) { // Buff 20%
-      type = Math.random() < 0.5 ? 'BUFF_DMG' : 'BUFF_SPD';
-    } else { // Armor 15%
-      type = 'ARMOR';
+    // Reward table
+    const roll = Math.random();
+    let count;
+    if (roll < 0.25)       count = -1; // high-tier single reward
+    else if (roll < 0.65)  count = 2;
+    else if (roll < 0.90)  count = 3;
+    else                   count = 4;
+
+    if (count === -1) {
+      const item = this._highTierReward(game);
+      if (item) game.dungeon.items.push(item);
+    } else {
+      for (let i = 0; i < count; i++) {
+        const item = this._basicReward(game, i);
+        if (item) game.dungeon.items.push(item);
+      }
     }
-    
-    game.dungeon.items.push(new Item(type, this.x, this.y, opts));
+  }
+
+  _highTierReward(game) {
+    const r = Math.random();
+    if (r < 0.18) {
+      // Full ammo current weapon
+      const w = game.player.weapon;
+      if (w.pellets > 0) w.ammo = w.ammoMax;
+      game.floatingTexts.push(new FloatingText(this.x, this.y - 24, 'FULL AMMO!', '#44aaff'));
+      return null;
+    } else if (r < 0.36) {
+      // 25% max HP heal
+      const heal = Math.round(game.player.maxHp * 0.25);
+      game.player.hp = Math.min(game.player.maxHp, game.player.hp + heal);
+      game.floatingTexts.push(new FloatingText(this.x, this.y - 24, '+' + heal + ' HP', '#ff4488'));
+      return null;
+    } else if (r < 0.52) {
+      // Full armor
+      game.player.armor = game.player.maxArmor;
+      game.floatingTexts.push(new FloatingText(this.x, this.y - 24, 'FULL ARMOR!', '#8888ff'));
+      return null;
+    } else if (r < 0.66) {
+      return new Item('BUFF_DMG', this.x, this.y, { duration: 15 });
+    } else if (r < 0.80) {
+      return new Item('BUFF_SPD', this.x, this.y, { duration: 12 });
+    } else {
+      // 1-hit shield
+      game.player.hitShield = true;
+      game.floatingTexts.push(new FloatingText(this.x, this.y - 24, 'SHIELD UP!', '#00ffff'));
+      return null;
+    }
+  }
+
+  _basicReward(game, idx) {
+    const spread = (Math.random() - 0.5) * 36;
+    const r = Math.random();
+    if (r < 0.40) {
+      const aTypes = ['PISTOL', 'SHOTGUN', 'SMG'];
+      const ammoType = game.rng.pick(aTypes);
+      const ammoAmount = ammoType === 'SHOTGUN' ? 4 : ammoType === 'SMG' ? 30 : 15;
+      return new Item('AMMO', this.x + spread, this.y + spread, { ammoType, ammoAmount });
+    } else if (r < 0.65) {
+      return new Item('POTION', this.x + spread, this.y + spread);
+    } else if (r < 0.85) {
+      return new Item(Math.random() < 0.5 ? 'BUFF_DMG' : 'BUFF_SPD', this.x, this.y);
+    } else {
+      return new Item('ARMOR', this.x + spread, this.y + spread);
+    }
   }
 
   update(dt) {
@@ -481,10 +540,20 @@ class Crate {
   draw(ctx) {
     const sx = this.shake > 0 ? (Math.random() - 0.5) * 6 : 0;
     const sy = this.shake > 0 ? (Math.random() - 0.5) * 6 : 0;
-    
+
     ctx.save();
     ctx.translate(this.x + sx, this.y + sy);
-    
+
+    // Gold rarity glow
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.12 + Math.sin(Date.now() * 0.003) * 0.06;
+    const rg = ctx.createRadialGradient(0, 0, 0, 0, 0, 38);
+    rg.addColorStop(0, '#ffcc44'); rg.addColorStop(1, 'transparent');
+    ctx.fillStyle = rg;
+    ctx.beginPath(); ctx.arc(0, 0, 38, 0, Math.PI * 2); ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+
     // Shadow
     ctx.fillStyle = 'rgba(0,0,0,0.5)';
     ctx.beginPath();
@@ -774,15 +843,12 @@ class DungeonGenerator {
       }
     }
 
-    // Crates — random spots in room
-    if (room.type !== ROOM_SPAWN) {
-      const crateCount = rng.int(1, 4);
-      for (let i = 0; i < crateCount; i++) {
-        const cx = rng.int(room.x + 1, room.x + room.w - 1);
-        const cy = rng.int(room.y + 1, room.y + room.h - 1);
-        if (map[cy * mapW + cx] === TILE_FLOOR) {
-          room.crates.push(new Crate(cx * TILE + TILE / 2, cy * TILE + TILE / 2));
-        }
+    // Crates — rare (20% per room, max 1, never in boss or spawn rooms)
+    if (room.type !== ROOM_SPAWN && room.type !== ROOM_BOSS && rng.bool(0.20)) {
+      const cx = rng.int(room.x + 1, room.x + room.w - 1);
+      const cy = rng.int(room.y + 1, room.y + room.h - 1);
+      if (map[cy * mapW + cx] === TILE_FLOOR) {
+        room.crates.push(new Crate(cx * TILE + TILE / 2, cy * TILE + TILE / 2));
       }
     }
 
@@ -935,8 +1001,9 @@ class Item {
     this.radius = 16;
     this.bobT   = Math.random() * Math.PI * 2;
     this.despawnTimer = 12.0;
-    this.ammoType = opts.ammoType || 'PISTOL'; // PISTOL, SHOTGUN, SMG
+    this.ammoType   = opts.ammoType   || 'PISTOL';
     this.ammoAmount = opts.ammoAmount || 10;
+    this.duration   = opts.duration   || 10;
     
     switch (type) {
       case 'POTION': this.color = '#ff4488'; this.label = 'HP'; break;
@@ -1122,6 +1189,19 @@ class Player {
     this.buffDmg = 0;
     this.buffSpd = 0;
     this.stunTimer = 0;
+
+    // Perk system
+    this.perks        = [];
+    this.dmgPerkMult  = 0;
+    this.critChance   = 0;
+    this.fireRateBonus= 0;
+    this.resistMult   = 0;
+    this.lifesteal    = 0;
+    this.spdPerkMult  = 0;
+    this.reloadBonus  = 0;
+    this.dashCdMult   = 1;
+    this.hitShield    = false;
+    this.potionCapacity = 5;
   }
 
   get weapon() { return this.weapons[this.weaponIdx]; }
@@ -1209,12 +1289,36 @@ class Player {
     this.fireCooldown = 0.1;
     this.weaponPopupTimer = 1.2;
     this.weaponScale = 1.35;
-    // Sound stub: playWeaponClick();
+  }
+
+  addPerk(type, game) {
+    let entry = this.perks.find(p => p.type === type);
+    if (!entry) { entry = { type, stacks: 0 }; this.perks.push(entry); }
+    const mult = Math.pow(0.7, entry.stacks); // diminishing returns per stack
+    entry.stacks++;
+
+    switch (type) {
+      case 'DMG'      : this.dmgPerkMult   += 0.08 * mult; break;
+      case 'CRIT'     : this.critChance    += 0.05 * mult; break;
+      case 'FIRERATE' : this.fireRateBonus += 0.10 * mult; break;
+      case 'MAXHP'    : {
+        const bonus = Math.round(this.maxHp * 0.12 * mult);
+        this.maxHp += bonus; this.hp = Math.min(this.maxHp, this.hp + bonus); break;
+      }
+      case 'RESIST'   : this.resistMult   += 0.10 * mult; break;
+      case 'POTION'   : this.potionCapacity++; this.potions = Math.min(this.potionCapacity, this.potions + 1); break;
+      case 'LIFESTEAL': this.lifesteal    += 0.05 * mult; break;
+      case 'SPEED'    : this.spdPerkMult  += 0.08 * mult; break;
+      case 'DASHCD'   : this.dashCdMult   *= (1 - 0.10 * mult); break;
+      case 'RELOAD'   : this.reloadBonus  += 0.10 * mult; break;
+    }
+    const def = PERK_DEFS[type];
+    game.particles.burst(this.x, this.y, 22, { color: def.color, type: 'glow', speed: 90, life: 0.8, size: 6 });
   }
 
   _fire(game) {
     const w = this.weapon;
-    this.fireCooldown = w.fireRate;
+    this.fireCooldown = w.fireRate * Math.max(0.1, 1 - this.fireRateBonus);
     w.ammo--;
 
     const mw = game.camera.toWorld(game.input.mouse.x, game.input.mouse.y);
@@ -1222,7 +1326,13 @@ class Player {
     const ox = Math.cos(baseAngle) * (this.radius + 6);
     const oy = Math.sin(baseAngle) * (this.radius + 6);
 
-    const dmg = this.buffDmg > 0 ? w.damage * 1.5 : w.damage;
+    let dmg = this.buffDmg > 0 ? w.damage * 1.5 : w.damage;
+    dmg *= (1 + this.dmgPerkMult);
+    const isCrit = Math.random() < this.critChance;
+    if (isCrit) {
+      dmg *= 1.5;
+      game.floatingTexts.push(new FloatingText(this.x, this.y - 30, 'CRIT!', '#ffff00'));
+    }
 
     for (let i = 0; i < w.pellets; i++) {
       const a = baseAngle + (Math.random() - 0.5) * w.spread;
@@ -1307,7 +1417,7 @@ class Player {
     this.dashVx = nx * 480; this.dashVy = ny * 480;
     this.dashing   = true;
     this.dashDur   = 0.18;
-    this.dashCd    = 0.8;
+    this.dashCd    = 0.8 * this.dashCdMult;
     this.stamina  -= 25;
     this.invincible = this.dashDur;
   }
@@ -1328,6 +1438,7 @@ class Player {
       if (dx !== 0 && dy !== 0) { dx *= 0.707; dy *= 0.707; }
       
       let speedMult = this.buffSpd > 0 ? 1.4 : 1;
+      speedMult *= (1 + this.spdPerkMult);
       if (this.stunTimer > 0) speedMult *= 0.4;
       
       this.vx += dx * accel * dt * speedMult;
@@ -1367,6 +1478,14 @@ class Player {
 
   takeDamage(amount, game) {
     if (this.invincible > 0 || this.shieldActive) return;
+    // One-hit negation shield from crate/perk
+    if (this.hitShield) {
+      this.hitShield = false;
+      game.floatingTexts.push(new FloatingText(this.x, this.y - 24, 'BLOCKED!', '#00ffff'));
+      game.particles.burst(this.x, this.y, 10, { color: '#00ffff', type: 'spark', speed: 100, life: 0.3 });
+      return;
+    }
+    amount *= (1 - Math.min(0.70, this.resistMult));
     const absorbed = Math.min(amount * 0.6, this.armor);
     this.armor -= absorbed;
     amount    -= absorbed;
@@ -1545,10 +1664,10 @@ class Enemy {
     this.x  = x; this.y  = y;
     this.px = x; this.py = y;
     this.vx = 0; this.vy = 0;
-    this.hp      = def.hp  * Math.pow(1.12, s);
+    this.hp      = def.hp  * Math.pow(1.15, s);
     this.maxHp   = this.hp;
-    this.damage  = def.dmg * Math.pow(1.09, s);
-    this.speed   = def.spd * Math.pow(1.02, s);
+    this.damage  = def.dmg * Math.pow(1.10, s);
+    this.speed   = def.spd * Math.pow(1.03, s);
     this.radius  = def.radius;
     this.detect  = def.detect;
     this.color   = def.color;
@@ -1569,6 +1688,32 @@ class Enemy {
     else if (level >= 20 && level < 30) { this.modifier = 'SHIELDED'; this.shield = 30; }
     else if (level >= 30 && level < 40) { this.modifier = 'FAST'; this.speed *= 1.5; this.radius *= 0.85; }
     else if (level >= 40) this.modifier = 'EXPLODING';
+
+    // Elite system (level 5+)
+    this.isElite     = false;
+    this.isBoss      = false;
+    this.bossTier    = 0;
+    this.eliteMods   = [];
+    this.eliteShield = 0;
+    this.regenTimer  = 0;
+    this.phaseCd     = 5 + Math.random() * 3;
+    this._raging     = false;
+
+    if (level >= 5) {
+      const eliteChance = Math.min(0.35, 0.05 + Math.floor(level / 3) * 0.02);
+      if (Math.random() < eliteChance) {
+        this.isElite  = true;
+        this.hp      *= 2; this.maxHp *= 2;
+        this.damage  *= 1.3;
+        this.radius  *= 1.12;
+        const pool = ['SHIELDED_E','EXPLOSIVE_E','FRENZIED','REGEN','PHASE','REFLECTIVE']
+          .sort(() => Math.random() - 0.5);
+        const n = Math.random() < 0.3 ? 2 : 1;
+        for (let i = 0; i < n; i++) this.eliteMods.push(pool[i]);
+        if (this.eliteMods.includes('FRENZIED'))   { this.speed *= 1.4; }
+        if (this.eliteMods.includes('SHIELDED_E')) { this.eliteShield = 3; }
+      }
+    }
   }
 
   update(dt, player, dungeon, game) {
@@ -1596,6 +1741,31 @@ class Enemy {
         (player.x / TILE) | 0, (player.y / TILE) | 0,
         dungeon.map, dungeon.mapW
       );
+
+    // Elite: regeneration
+    if (this.isElite && this.eliteMods.includes('REGEN')) {
+      this.regenTimer += dt;
+      if (this.regenTimer >= 1.0) {
+        this.hp = Math.min(this.maxHp, this.hp + this.maxHp * 0.015);
+        this.regenTimer = 0;
+      }
+    }
+    // Elite: phase step (teleport near player)
+    if (this.isElite && this.eliteMods.includes('PHASE') && this.state === 'chase') {
+      this.phaseCd -= dt;
+      if (this.phaseCd <= 0 && distToPlayer < 220) {
+        const a = Math.atan2(player.y - this.y, player.x - this.x);
+        const nx = player.x - Math.cos(a) * 55;
+        const ny = player.y - Math.sin(a) * 55;
+        const tx = (nx / TILE) | 0, ty = (ny / TILE) | 0;
+        if (tx >= 0 && ty >= 0 && dungeon.map[ty * dungeon.mapW + tx] === TILE_FLOOR) {
+          game.particles.burst(this.x, this.y, 10, { color: '#ffffff', type: 'glow', speed: 70, life: 0.3 });
+          this.x = nx; this.y = ny;
+          game.particles.burst(this.x, this.y, 10, { color: '#ffffff', type: 'glow', speed: 70, life: 0.3 });
+        }
+        this.phaseCd = 5 + Math.random() * 3;
+      }
+    }
 
     this._stateMachine(dt, player, dungeon, game, distToPlayer, canSee);
 
@@ -1688,6 +1858,17 @@ class Enemy {
   }
 
   takeDamage(amount, game) {
+    // Elite hit-absorb shield (absorbs 3 hits)
+    if (this.isElite && this.eliteShield > 0) {
+      this.eliteShield--;
+      game.particles.burst(this.x, this.y, 8, { color: '#ffcc44', type: 'spark', speed: 110, life: 0.3 });
+      game.floatingTexts.push(new FloatingText(this.x, this.y - 24, 'SHIELD!', '#ffcc44'));
+      return;
+    }
+    // Elite reflective: bounce 20% damage back
+    if (this.isElite && this.eliteMods.includes('REFLECTIVE') && game.player.invincible <= 0) {
+      game.player.takeDamage(amount * 0.2, game);
+    }
     if (this.modifier === 'SHIELDED' && this.shield > 0) {
       const abs = Math.min(amount, this.shield);
       this.shield -= abs; amount -= abs;
@@ -1700,30 +1881,39 @@ class Enemy {
 
   _die(game) {
     this.alive = false;
-    if (this.modifier === 'EXPLODING') {
+    // Boss / elite explosion modifiers
+    if (this.isElite && this.eliteMods.includes('EXPLOSIVE_E')) {
+      game.spawnExplosion(this.x, this.y, 100, 50);
+    } else if (this.modifier === 'EXPLODING') {
       game.spawnExplosion(this.x, this.y, 80, 40);
     }
     game.onEnemyKilled(this);
     game.player.onKill(game);
-    // Drop chance
+
+    // Lifesteal on kill
+    if (game.player.lifesteal > 0) {
+      const heal = Math.round(this.maxHp * game.player.lifesteal * 0.15);
+      if (heal > 0) {
+        game.player.hp = Math.min(game.player.maxHp, game.player.hp + heal);
+        game.floatingTexts.push(new FloatingText(this.x, this.y - 20, '+' + heal + ' HP', '#ff0066'));
+      }
+    }
+
+    const elite = this.isElite;
     const hpPct = game.player.hp / game.player.maxHp;
     const dropChance = game.difficulty.getPotionDropChance(hpPct);
-    if (Math.random() < dropChance) {
+    if (elite || Math.random() < dropChance) {
       game.dungeon.items.push(new Item('POTION', this.x, this.y));
     }
-    
-    // Ammo drop based on enemy type
-    if (Math.random() < 0.25) {
-      let ammoType = 'PISTOL';
-      let amount = 12;
+    if (Math.random() < (elite ? 0.55 : 0.25)) {
+      let ammoType = 'PISTOL', amount = 12;
       if (this.type === 'ARCHER') { ammoType = 'SHOTGUN'; amount = 4; }
       else if (this.type === 'WRAITH') { ammoType = 'SMG'; amount = 25; }
-      else if (this.type === 'OGRE') { ammoType = 'SHOTGUN'; amount = 8; }
-      
+      else if (this.type === 'OGRE')   { ammoType = 'SHOTGUN'; amount = 8; }
+      if (elite) amount = Math.floor(amount * 2);
       game.dungeon.items.push(new Item('AMMO', this.x, this.y, { ammoType, ammoAmount: amount }));
     }
-    
-    if (Math.random() < 0.08) {
+    if (Math.random() < (elite ? 0.35 : 0.08)) {
       game.dungeon.items.push(new Item('ARMOR', this.x, this.y));
     }
   }
@@ -1779,6 +1969,35 @@ class Enemy {
       ctx.fillRect(bx, by, bw * (this.hp / this.maxHp), bh);
     }
 
+    ctx.restore();
+  }
+
+  _drawEliteOverlay(ctx) {
+    if (!this.isElite) return;
+    const depth = 0.85 + (this.y / 1500) * 0.28;
+    const r = this.radius * depth;
+    const t = Date.now() * 0.001;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.28 + Math.sin(t * 5) * 0.12;
+    const eg = ctx.createRadialGradient(this.x, this.y, r * 0.6, this.x, this.y, r * 2.4);
+    eg.addColorStop(0, '#ffcc44'); eg.addColorStop(1, 'transparent');
+    ctx.fillStyle = eg;
+    ctx.beginPath(); ctx.arc(this.x, this.y, r * 2.4, 0, Math.PI * 2); ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 0.9;
+    ctx.strokeStyle = '#ffcc44';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(this.x, this.y, r + 5, 0, Math.PI * 2); ctx.stroke();
+    if (this.eliteShield > 0) {
+      for (let i = 0; i < this.eliteShield; i++) {
+        const a = (i / 3) * Math.PI * 2 - Math.PI / 2;
+        ctx.fillStyle = '#ffcc44';
+        ctx.beginPath();
+        ctx.arc(this.x + Math.cos(a) * (r + 10), this.y + Math.sin(a) * (r + 10), 3.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
     ctx.restore();
   }
 }
@@ -1893,6 +2112,7 @@ class Goblin extends Enemy {
 
     ctx.restore();
 
+    this._drawEliteOverlay(ctx);
     // HP bar (only if damaged)
     if (this.hp < this.maxHp) {
       const bw = r * 2.2, bh = 3;
@@ -1967,17 +2187,37 @@ class Ogre extends Enemy {
       const d = dist2(this.x, this.y, player.x, player.y);
       if (!this.hasDamagedThisSmash && d < this.telegraphRadius + player.radius) {
         player.takeDamage(this.damage, game);
-        // Knockback
         const [kx, ky] = vecNorm(player.x - this.x, player.y - this.y);
         player.vx += kx * 450;
         player.vy += ky * 450;
-        // Stun (slow)
-        player.buffSpd = -0.4; // I'll handle negative speed buff as slow
         player.stunTimer = 0.4;
         this.hasDamagedThisSmash = true;
         game.camera.shake(10, 0.25);
       }
       if (this.shockwaveR > this.telegraphRadius) this.shockwaveActive = false;
+    }
+
+    // Boss Tier 3: phase 2 at 50% HP — summon goblins
+    if (this.isBoss && this.bossTier >= 3 && !this._phase2 && this.hp / this.maxHp < 0.5) {
+      this._phase2 = true;
+      game.floatingTexts.push(new FloatingText(this.x, this.y - 60, 'PHASE 2!', '#ff4400'));
+      game.camera.shake(14, 0.5);
+      game.particles.burst(this.x, this.y, 35, { color: '#ff4400', type: 'glow', speed: 120, life: 0.7 });
+      for (let i = 0; i < 3; i++) {
+        const a = (i / 3) * Math.PI * 2;
+        const gx = this.x + Math.cos(a) * 90, gy = this.y + Math.sin(a) * 90;
+        const tx = (gx / TILE) | 0, ty = (gy / TILE) | 0;
+        if (dungeon.map && dungeon.map[ty * dungeon.mapW + tx] === TILE_FLOOR) {
+          game.enemies.push(new Goblin(gx, gy, game.level, game));
+        }
+      }
+    }
+    // Boss Tier 4: rage below 25%
+    if (this.isBoss && this.bossTier >= 4 && !this._raging && this.hp / this.maxHp < 0.25) {
+      this._raging = true;
+      this.speed *= 1.6;
+      game.floatingTexts.push(new FloatingText(this.x, this.y - 60, 'RAGE!', '#ff0000'));
+      game.camera.shake(10, 0.4);
     }
   }
 
@@ -2106,8 +2346,26 @@ class Ogre extends Enemy {
       ctx.restore();
     }
 
+    // Boss tier: orange-gold boss aura
+    if (this.isBoss) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.18 + Math.sin(Date.now() * 0.004) * 0.08;
+      const bg2 = ctx.createRadialGradient(this.x, this.y, r, this.x, this.y, r * 3.5);
+      bg2.addColorStop(0, '#ff6600'); bg2.addColorStop(1, 'transparent');
+      ctx.fillStyle = bg2;
+      ctx.beginPath(); ctx.arc(this.x, this.y, r * 3.5, 0, Math.PI * 2); ctx.fill();
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = '#ff8800';
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(this.x, this.y, r + 8, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+    }
+
+    this._drawEliteOverlay(ctx);
     // HP bar (only if damaged)
-    if (this.hp < this.maxHp) {
+    if (this.hp < this.maxHp && !this.isBoss) {
       const bw = r * 2.2, bh = 4;
       const bx = this.x - bw / 2, by = this.y - r - 15;
       ctx.fillStyle = '#330000';
@@ -2239,6 +2497,7 @@ class SkeletonArcher extends Enemy {
     ctx.beginPath(); ctx.arc(0, 0, r * 2.5, 0, Math.PI * 2); ctx.fill();
 
     ctx.restore();
+    this._drawEliteOverlay(ctx);
 
     // HP bar
     if (this.hp < this.maxHp) {
@@ -2380,6 +2639,7 @@ class ShadowWraith extends Enemy {
     ctx.stroke();
 
     ctx.restore();
+    this._drawEliteOverlay(ctx);
 
     // HP bar
     if (this.hp < this.maxHp) {
@@ -2390,6 +2650,123 @@ class ShadowWraith extends Enemy {
       ctx.fillStyle = this.hp / this.maxHp > 0.5 ? '#44ff44' : this.hp / this.maxHp > 0.25 ? '#ffaa00' : '#ff2222';
       ctx.fillRect(bx, by, bw * (this.hp / this.maxHp), bh);
     }
+  }
+}
+
+// =============================================================================
+// 14c. SUPER CHEST — Level clear reward
+// =============================================================================
+class SuperChest {
+  constructor(x, y) {
+    this.x = x; this.y = y;
+    this.alive   = true;
+    this.opened  = false;
+    this.radius  = 28;
+    this.pulseT  = 0;
+    this.rayT    = 0;
+    this.choices = null;
+    this.interactRange = 70;
+  }
+
+  generateChoices() {
+    const types = Object.keys(PERK_DEFS);
+    for (let i = types.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [types[i], types[j]] = [types[j], types[i]];
+    }
+    this.choices = types.slice(0, 3);
+  }
+
+  tryOpen(player, game) {
+    if (this.opened) return false;
+    if (dist2(player.x, player.y, this.x, this.y) > this.interactRange) return false;
+    this.opened = true;
+    this.generateChoices();
+    game.particles.burst(this.x, this.y, 35, { color: '#ffcc44', type: 'glow', speed: 130, life: 0.9, size: 8 });
+    game.particles.burst(this.x, this.y, 20, { color: '#ffffff', type: 'spark', speed: 190, life: 0.5 });
+    game.camera.shake(6, 0.3);
+    return true;
+  }
+
+  update(dt) {
+    this.pulseT += dt * 2.5;
+    this.rayT   += dt * 0.4;
+  }
+
+  draw(ctx) {
+    if (this.opened) return;
+    const t = Date.now() * 0.001;
+    const pulse = 0.75 + Math.sin(this.pulseT) * 0.25;
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+
+    // Animated light rays
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2 + this.rayT;
+      ctx.globalAlpha = 0.07 * pulse;
+      ctx.strokeStyle = '#ffcc44';
+      ctx.lineWidth = 5 + Math.sin(t * 2.5 + i) * 2;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(Math.cos(a) * 95, Math.sin(a) * 95);
+      ctx.stroke();
+    }
+    // Pulsing aura
+    ctx.globalAlpha = 0.22 * pulse;
+    const ag = ctx.createRadialGradient(0, 0, 0, 0, 0, 68);
+    ag.addColorStop(0, '#ffcc44'); ag.addColorStop(1, 'transparent');
+    ctx.fillStyle = ag;
+    ctx.beginPath(); ctx.arc(0, 0, 68, 0, Math.PI * 2); ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.beginPath(); ctx.ellipse(0, 28, 32, 11, 0, 0, Math.PI * 2); ctx.fill();
+
+    // Chest body
+    ctx.fillStyle = '#2a1800';
+    ctx.fillRect(-27, -8, 54, 38);
+    // Lid
+    ctx.fillStyle = '#3d2400';
+    ctx.fillRect(-27, -26, 54, 22);
+
+    // Gold metal trim
+    ctx.strokeStyle = '#ffcc44';
+    ctx.lineWidth = 2.5;
+    ctx.strokeRect(-27, -26, 54, 22);
+    ctx.strokeRect(-27, -8, 54, 38);
+    ctx.beginPath(); ctx.moveTo(-27, -8); ctx.lineTo(27, -8); ctx.stroke();
+
+    // Orbiting gold sparkles
+    for (let i = 0; i < 4; i++) {
+      const sa = (i / 4) * Math.PI * 2 + t * 1.8;
+      const sr = 14 + Math.sin(t * 3 + i) * 4;
+      ctx.globalAlpha = 0.5 + Math.sin(t * 4 + i) * 0.3;
+      ctx.fillStyle = '#ffee88';
+      ctx.beginPath();
+      ctx.arc(Math.cos(sa) * sr, Math.sin(sa) * sr - 6, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // Glowing lock
+    ctx.fillStyle = '#ffcc44';
+    ctx.shadowBlur = 12; ctx.shadowColor = '#ffcc44';
+    ctx.beginPath(); ctx.arc(0, 6, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // E prompt
+    ctx.fillStyle = '#ffffff';
+    ctx.globalAlpha = 0.75 + Math.sin(t * 5) * 0.25;
+    ctx.font = 'bold 11px monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('[E] OPEN', 0, 52);
+    ctx.globalAlpha = 1;
+
+    ctx.restore();
   }
 }
 
@@ -2501,6 +2878,9 @@ class Renderer {
       this.worldCtx.fill();
       this.worldCtx.globalAlpha = 1;
     }
+
+    // Super chest
+    if (game.superChest && !game.superChest.opened) game.superChest.draw(this.worldCtx);
 
     // Y-sort and draw entities
     const entities = [...enemies.filter(e => e.alive), ...dungeon.crates.filter(c => c.alive), player].sort((a, b) => a.y - b.y);
@@ -2642,6 +3022,17 @@ class Renderer {
       lc.beginPath(); lc.arc(es.x, es.y, ex.radius * 1.5 * ep, 0, Math.PI * 2); lc.fill();
     }
 
+    // Super chest glow
+    if (game.superChest && !game.superChest.opened) {
+      const cs = camera.toScreen(game.superChest.x, game.superChest.y);
+      const cpulse = 0.7 + Math.sin(now * 3) * 0.3;
+      const cg2 = lc.createRadialGradient(cs.x, cs.y, 0, cs.x, cs.y, 80);
+      cg2.addColorStop(0, `rgba(255,204,68,${0.4 * cpulse})`);
+      cg2.addColorStop(1, 'transparent');
+      lc.fillStyle = cg2;
+      lc.beginPath(); lc.arc(cs.x, cs.y, 80, 0, Math.PI * 2); lc.fill();
+    }
+
     // Enemy glows
     for (const e of enemies) {
       if (!e.alive) continue;
@@ -2728,6 +3119,38 @@ function renderUI(ctx, game, now) {
     ctx.textBaseline = 'top';
     ctx.fillText('POTION: ' + p.potions, bx, by + (bh + gap) * 3 + 4);
 
+    // Active perk icons under potion row
+    if (p.perks.length > 0) {
+      const iconY = by + (bh + gap) * 3 + 24;
+      p.perks.forEach((perk, idx) => {
+        const def = PERK_DEFS[perk.type];
+        const ix = bx + idx * 24;
+        ctx.fillStyle = def.color;
+        ctx.globalAlpha = 0.65;
+        roundRect(ctx, ix, iconY, 22, 16, 2); ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 8px monospace';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(def.icon, ix + 11, iconY + 8);
+        if (perk.stacks > 1) {
+          ctx.fillStyle = '#ffff00';
+          ctx.font = '7px monospace';
+          ctx.textAlign = 'left';
+          ctx.fillText('x' + perk.stacks, ix + 15, iconY + 3);
+        }
+      });
+      ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    }
+
+    // Hit shield indicator
+    if (p.hitShield) {
+      ctx.fillStyle = '#00ffff';
+      ctx.font = 'bold 12px monospace';
+      ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.fillText('SHIELD', bx, by + (bh + gap) * 3 + 4 + (p.perks.length > 0 ? 22 : 0) + 18);
+    }
+
     // --- BOTTOM: Weapon + Ammo ---
     const wy = CANVAS_H - 60, wx = CANVAS_W / 2;
     const w  = p.weapon;
@@ -2787,6 +3210,32 @@ function renderUI(ctx, game, now) {
       ctx.restore();
     }
 
+    // Boss HP bar (top center, only when boss alive)
+    if (game.bossEnemy && game.bossEnemy.alive) {
+      const boss = game.bossEnemy;
+      const bbw = 420, bbh = 20;
+      const bbx = CANVAS_W / 2 - bbw / 2, bby = 12;
+      ctx.fillStyle = '#110000';
+      roundRect(ctx, bbx - 2, bby - 2, bbw + 4, bbh + 4, 5); ctx.fill();
+      const hpFrac = boss.hp / boss.maxHp;
+      const barColor = hpFrac > 0.5 ? '#ff4400' : hpFrac > 0.25 ? '#ff8800' : '#ff0000';
+      ctx.fillStyle = barColor;
+      roundRect(ctx, bbx, bby, Math.max(0, bbw * hpFrac), bbh, 3); ctx.fill();
+      ctx.strokeStyle = '#ff6600'; ctx.lineWidth = 2;
+      roundRect(ctx, bbx, bby, bbw, bbh, 3); ctx.stroke();
+      // Pulse at low HP
+      if (hpFrac < 0.25) {
+        ctx.globalAlpha = 0.3 + Math.sin(now * 8) * 0.2;
+        ctx.fillStyle = '#ff0000';
+        roundRect(ctx, bbx, bby, bbw, bbh, 3); ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      ctx.fillStyle = '#ffffff'; ctx.font = 'bold 11px monospace';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('BOSS  TIER ' + boss.bossTier + '  ' + Math.ceil(boss.hp) + ' / ' + Math.ceil(boss.maxHp),
+        CANVAS_W / 2, bby + bbh / 2);
+    }
+
     // --- TOP RIGHT: Level + Enemies ---
     ctx.fillStyle = '#00ffcc';
     ctx.font      = 'bold 28px monospace';
@@ -2825,6 +3274,17 @@ function renderUI(ctx, game, now) {
       ctx.globalAlpha = 1;
     }
 
+    // Super chest prompt (all enemies dead, chest not opened)
+    if (game.superChest && !game.superChest.opened && game.enemies.every(e => !e.alive)) {
+      const pulse3 = 0.6 + Math.sin(now * 4) * 0.4;
+      ctx.globalAlpha = pulse3;
+      ctx.fillStyle = '#ffcc44';
+      ctx.font = 'bold 18px monospace';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('ALL CLEAR  —  Find the SUPER CHEST  [E]', CANVAS_W / 2, CANVAS_H - 90);
+      ctx.globalAlpha = 1;
+    }
+
     // Level-up banner
     if (game.levelFlashTimer > 0) {
       const alpha = Math.min(1, game.levelFlashTimer / 0.3);
@@ -2837,6 +3297,91 @@ function renderUI(ctx, game, now) {
       ctx.textBaseline= 'middle';
       ctx.fillText('LEVEL ' + game.level, CANVAS_W / 2, CANVAS_H / 2);
       ctx.globalAlpha = 1;
+    }
+
+  } else if (game.state === 'CHEST_SELECT') {
+    // ── CHEST SELECTION OVERLAY ──────────────────────────────────────────
+    // Dim background (game world still visible underneath)
+    ctx.fillStyle = 'rgba(0,0,0,0.80)';
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+    // Bright flash burst
+    ctx.globalAlpha = 0.08 + Math.sin(now * 10) * 0.04;
+    ctx.fillStyle = '#ffcc44';
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+    ctx.globalAlpha = 1;
+
+    // Title
+    ctx.fillStyle = '#ffcc44';
+    ctx.font = 'bold 34px monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('LEVEL CLEAR — CHOOSE YOUR BUFF', CANVAS_W / 2, CANVAS_H * 0.18);
+
+    ctx.fillStyle = 'rgba(255,204,68,0.4)';
+    ctx.fillRect(CANVAS_W / 2 - 320, CANVAS_H * 0.18 + 22, 640, 2);
+
+    const chest = game.superChest;
+    if (chest && chest.choices) {
+      const cardW = 240, cardH = 160, cardGap = 24;
+      const totalW = cardW * 3 + cardGap * 2;
+      const startX = CANVAS_W / 2 - totalW / 2;
+      const cardY = CANVAS_H * 0.34;
+
+      chest.choices.forEach((type, i) => {
+        const def = PERK_DEFS[type];
+        const cx = startX + i * (cardW + cardGap);
+
+        // Card bg
+        ctx.fillStyle = 'rgba(8,8,22,0.97)';
+        roundRect(ctx, cx, cardY, cardW, cardH, 10); ctx.fill();
+        // Border glow
+        ctx.strokeStyle = def.color; ctx.lineWidth = 2.5;
+        roundRect(ctx, cx, cardY, cardW, cardH, 10); ctx.stroke();
+        // Inner glow
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = 0.07;
+        ctx.fillStyle = def.color;
+        roundRect(ctx, cx, cardY, cardW, cardH, 10); ctx.fill();
+        ctx.restore();
+
+        // Key hint
+        ctx.fillStyle = def.color;
+        ctx.font = 'bold 18px monospace';
+        ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+        ctx.fillText('[' + (i + 1) + ']', cx + 12, cardY + 12);
+
+        // Icon
+        ctx.fillStyle = def.color;
+        ctx.font = 'bold 36px monospace';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.shadowBlur = 12; ctx.shadowColor = def.color;
+        ctx.fillText(def.icon, cx + cardW / 2, cardY + 66);
+        ctx.shadowBlur = 0;
+
+        // Name
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 15px monospace';
+        ctx.fillText(def.name, cx + cardW / 2, cardY + 108);
+
+        // Stack / diminishing returns note
+        const existing = game.player.perks.find(pp => pp.type === type);
+        if (existing) {
+          const eff = Math.round(Math.pow(0.7, existing.stacks) * 100);
+          ctx.fillStyle = '#aaaaaa';
+          ctx.font = '11px monospace';
+          ctx.fillText('(' + eff + '% effective)', cx + cardW / 2, cardY + 130);
+        }
+      });
+    }
+
+    // Currently held perks
+    if (p.perks.length > 0) {
+      ctx.fillStyle = '#888888';
+      ctx.font = '11px monospace';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('ACTIVE PERKS: ' + p.perks.map(pp => PERK_DEFS[pp.type].icon + (pp.stacks > 1 ? 'x' + pp.stacks : '')).join('  '),
+        CANVAS_W / 2, CANVAS_H * 0.88);
     }
 
   } else if (game.state === 'GAME_OVER') {
@@ -2948,6 +3493,10 @@ class Game {
     this.hitFlashTimer   = 0;
     this.levelFlashTimer = 0;
 
+    this.superChest = null;
+    this._superChestSpawned = false;
+    this.bossEnemy  = null;
+
     this._restartBtn = null;
     this.lastTime    = performance.now();
 
@@ -2958,6 +3507,9 @@ class Game {
     this.dungeon  = new DungeonGenerator(this.rng, this.level).generate();
     this.renderer.bgDirty = true;
     this.difficulty.level = this.level;
+    this.superChest = null;
+    this._superChestSpawned = false;
+    this.bossEnemy  = null;
 
     const spawn = this.dungeon.spawnRoom;
     const sx    = (spawn.cx * TILE + TILE / 2);
@@ -2968,22 +3520,35 @@ class Game {
     } else {
       this.player.x = sx; this.player.y = sy;
       this.player.vx = 0; this.player.vy = 0;
-      // Give ammo refill on level
       this.player.weapons.forEach(w => { if (w.pellets > 0) w.ammo = Math.min(w.ammoMax, w.ammo + Math.floor(w.ammoMax * 0.4)); });
-      this.player.potions = Math.min(5, this.player.potions + 1);
+      this.player.potions = Math.min(this.player.potionCapacity, this.player.potions + 1);
     }
 
     // Unlock weapons at certain levels
     if (this.level >= 3 && this.player.weapons[1].ammo === 0) this.player.weapons[1].ammo = WEAPON_DEFS.SHOTGUN.ammoMax;
     if (this.level >= 5 && this.player.weapons[2].ammo === 0) this.player.weapons[2].ammo = WEAPON_DEFS.SMG.ammoMax;
 
-    // Spawn enemies from all rooms
+    // Spawn enemies — with boss evolution at multiples of 10
     this.enemies = [];
+    let bossSpawned = false;
     for (const room of this.dungeon.rooms) {
       if (room.type === ROOM_SPAWN) continue;
       for (const ed of room.enemies) {
         const EClass = { GOBLIN: Goblin, OGRE: Ogre, ARCHER: SkeletonArcher, WRAITH: ShadowWraith }[ed.type] || Enemy;
-        this.enemies.push(new EClass(ed.tx, ed.ty, this.level, this));
+        const enemy = new EClass(ed.tx, ed.ty, this.level, this);
+        // Boss evolution: every 10 levels, elevate the first Ogre in a boss room
+        if (!bossSpawned && room.type === ROOM_BOSS && ed.type === 'OGRE' && this.level % 10 === 0) {
+          bossSpawned = true;
+          enemy.isBoss   = true;
+          enemy.bossTier = Math.floor(this.level / 10);
+          const tier = enemy.bossTier;
+          enemy.hp     *= Math.pow(1.4, tier); enemy.maxHp *= Math.pow(1.4, tier);
+          enemy.damage *= Math.pow(1.2, tier);
+          enemy.radius *= 1.3;
+          enemy.telegraphRadius = 130 + tier * 22;
+          this.bossEnemy = enemy;
+        }
+        this.enemies.push(enemy);
       }
     }
 
@@ -3019,21 +3584,33 @@ class Game {
     }
   }
 
-  _checkLevelComplete() {
-    const exit = this.dungeon.exitRoom;
-    if (!exit) return;
-    const p = this.player;
-    const ex = exit.cx * TILE + TILE / 2;
-    const ey = exit.cy * TILE + TILE / 2;
-    if (dist2(p.x, p.y, ex, ey) < TILE * 1.5 && this.enemies.every(e => !e.alive)) {
-      this.level++;
-      this._generateLevel(false);
+  _checkLevelComplete(ePress = false) {
+    if (this.state !== 'PLAYING') return;
+    const allDead = this.enemies.every(e => !e.alive);
+    if (!allDead) return;
+
+    // Spawn Super Chest once at exit room center
+    if (!this._superChestSpawned) {
+      this._superChestSpawned = true;
+      const exit = this.dungeon.exitRoom;
+      if (exit) {
+        const ex = exit.cx * TILE + TILE / 2;
+        const ey = exit.cy * TILE + TILE / 2;
+        this.superChest = new SuperChest(ex, ey);
+        this.levelFlashTimer = 0.8;
+      }
+    }
+
+    // Player interacts with Super Chest → CHEST_SELECT
+    if (this.superChest && !this.superChest.opened && ePress) {
+      if (this.superChest.tryOpen(this.player, this)) {
+        this.state = 'CHEST_SELECT';
+      }
     }
   }
 
-  _checkPickups() {
+  _checkPickups(interact = false) {
     const p = this.player;
-    const interact = this.input.justPressed('KeyE');
     
     for (let i = this.dungeon.items.length - 1; i >= 0; i--) {
       const item = this.dungeon.items[i];
@@ -3059,8 +3636,8 @@ class Game {
         } else if (item.type === 'POTION' || item.type === 'ARMOR' || item.type.startsWith('BUFF')) {
           if (item.type === 'POTION') { p.hp = Math.min(p.maxHp, p.hp + 35); text = '+35 HP'; }
           else if (item.type === 'ARMOR') { p.armor = Math.min(p.maxArmor, p.armor + 20); text = '+20 ARMOR'; }
-          else if (item.type === 'BUFF_DMG') { p.buffDmg = 10.0; text = 'DMG BOOST!'; }
-          else if (item.type === 'BUFF_SPD') { p.buffSpd = 8.0; text = 'SPD BOOST!'; }
+          else if (item.type === 'BUFF_DMG') { p.buffDmg = item.duration; text = 'DMG BOOST!'; }
+          else if (item.type === 'BUFF_SPD') { p.buffSpd = item.duration; text = 'SPD BOOST!'; }
           picked = true;
         }
 
@@ -3091,14 +3668,39 @@ class Game {
     this.enemies   = [];
     this.projectiles = [];
     this.explosions  = [];
+    this.floatingTexts = [];
     this.hitFlashTimer = 0;
     this.levelFlashTimer = 0;
+    this.superChest = null;
+    this._superChestSpawned = false;
+    this.bossEnemy  = null;
     this.state = 'PLAYING';
     this._generateLevel(true);
   }
 
   update(dt) {
     if (this.state === 'GAME_OVER') return;
+
+    // CHEST_SELECT: freeze game, handle perk choice
+    if (this.state === 'CHEST_SELECT') {
+      const chest = this.superChest;
+      if (chest && chest.choices) {
+        for (let i = 0; i < 3; i++) {
+          if (this.input.justPressed('Digit' + (i + 1))) {
+            this.player.addPerk(chest.choices[i], this);
+            this.superChest = null;
+            this.state = 'PLAYING';
+            this.level++;
+            this._generateLevel(false);
+            this.input.flush();
+            return;
+          }
+        }
+      }
+      this.input.flush();
+      return;
+    }
+
     this.survivalTime += dt;
 
     // Hit stop time scale
@@ -3142,6 +3744,11 @@ class Game {
           if (!e.alive) continue;
           if (dist2(proj.x, proj.y, e.x, e.y) < proj.radius + e.radius) {
             e.takeDamage(proj.damage, this);
+            // Lifesteal on hit
+            if (this.player.lifesteal > 0) {
+              const steal = proj.damage * this.player.lifesteal;
+              this.player.hp = Math.min(this.player.maxHp, this.player.hp + steal);
+            }
             this.triggerHitStop();
             this.camera.shake(2, 0.08);
             this.particles.burst(proj.x, proj.y, 6, { color: proj.color, type: 'spark', speed: 90, life: 0.2 });
@@ -3194,8 +3801,12 @@ class Game {
     // Crates
     for (const c of this.dungeon.crates) c.update(eff);
 
-    this._checkPickups();
-    this._checkLevelComplete();
+    // Super chest
+    if (this.superChest) this.superChest.update(eff);
+
+    const ePress = this.input.justPressed('KeyE');
+    this._checkPickups(ePress);
+    this._checkLevelComplete(ePress);
     this.input.flush();
 
     if (!this.player.alive) this._gameOver();
