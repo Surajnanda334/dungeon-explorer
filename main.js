@@ -110,9 +110,10 @@ function lineOfSight(x0, y0, x1, y1, map, mapW) {
 class InputHandler {
   constructor(canvas) {
     this.keys  = {};
-    this.mouse = { x: CANVAS_W / 2, y: CANVAS_H / 2, down: false, rightDown: false };
+    this.mouse = { x: CANVAS_W / 2, y: CANVAS_H / 2, down: false, rightDown: false, wheel: 0 };
     this._justPressed  = {};
     this._justReleased = {};
+    this._lastWheelTime = 0;
 
     window.addEventListener('keydown', e => {
       if (!this.keys[e.code]) this._justPressed[e.code] = true;
@@ -138,12 +139,26 @@ class InputHandler {
       if (e.button === 0) this.mouse.down = false;
       if (e.button === 2) this.mouse.rightDown = false;
     });
+    canvas.addEventListener('wheel', e => {
+      e.preventDefault();
+      const now = performance.now();
+      if (now - this._lastWheelTime < 150) return;
+      this.mouse.wheel = Math.sign(e.deltaY);
+      this._lastWheelTime = now;
+    }, { passive: false });
     canvas.addEventListener('contextmenu', e => e.preventDefault());
   }
 
   isDown(code)     { return !!this.keys[code]; }
   justPressed(code){ const v = !!this._justPressed[code]; this._justPressed[code] = false; return v; }
-  flush()          { this._justPressed = {}; this._justReleased = {}; }
+  
+  getWheel() {
+    const w = this.mouse.wheel;
+    this.mouse.wheel = 0;
+    return w;
+  }
+
+  flush()          { this._justPressed = {}; this._justReleased = {}; this.mouse.wheel = 0; }
 
   get moveX() {
     return (this.isDown('KeyD') || this.isDown('ArrowRight') ? 1 : 0)
@@ -402,6 +417,109 @@ class ParticleSystem {
 }
 
 // =============================================================================
+// 11b. CRATE
+// =============================================================================
+class Crate {
+  constructor(x, y) {
+    this.x = x; this.y = y;
+    this.hp = 30;
+    this.maxHp = 30;
+    this.alive = true;
+    this.radius = 20;
+    this.shake = 0;
+    this.hitFlash = 0;
+  }
+
+  takeDamage(amount, game) {
+    this.hp -= amount;
+    this.shake = 0.2;
+    this.hitFlash = 0.15;
+    
+    // Wood debris
+    game.particles.burst(this.x, this.y, 5, { 
+      color: '#8b5a2b', type: 'dot', speed: 80, life: 0.4, size: 4, drag: 0.85 
+    });
+
+    if (this.hp <= 0) this._break(game);
+  }
+
+  _break(game) {
+    this.alive = false;
+    game.camera.shake(3, 0.15);
+    
+    // Large wood burst
+    game.particles.burst(this.x, this.y, 15, { 
+      color: '#8b5a2b', type: 'dot', speed: 120, life: 0.6, size: 5, drag: 0.88 
+    });
+
+    // Random drop
+    const r = Math.random();
+    let type = '';
+    let opts = {};
+    
+    if (r < 0.40) { // Ammo 40%
+      type = 'AMMO';
+      const aTypes = ['PISTOL', 'SHOTGUN', 'SMG'];
+      opts.ammoType = game.rng.pick(aTypes);
+      opts.ammoAmount = opts.ammoType === 'SHOTGUN' ? 4 : opts.ammoType === 'SMG' ? 30 : 15;
+    } else if (r < 0.65) { // Health 25%
+      type = 'POTION';
+    } else if (r < 0.85) { // Buff 20%
+      type = Math.random() < 0.5 ? 'BUFF_DMG' : 'BUFF_SPD';
+    } else { // Armor 15%
+      type = 'ARMOR';
+    }
+    
+    game.dungeon.items.push(new Item(type, this.x, this.y, opts));
+  }
+
+  update(dt) {
+    this.shake = Math.max(0, this.shake - dt);
+    this.hitFlash = Math.max(0, this.hitFlash - dt);
+  }
+
+  draw(ctx) {
+    const sx = this.shake > 0 ? (Math.random() - 0.5) * 6 : 0;
+    const sy = this.shake > 0 ? (Math.random() - 0.5) * 6 : 0;
+    
+    ctx.save();
+    ctx.translate(this.x + sx, this.y + sy);
+    
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.beginPath();
+    ctx.ellipse(0, 16, 22, 8, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Box body
+    const color = this.hitFlash > 0 ? '#ffaaaa' : '#8b5a2b';
+    ctx.fillStyle = color;
+    ctx.fillRect(-20, -20, 40, 40);
+    
+    // Details
+    ctx.strokeStyle = '#5d3a1a';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(-20, -20, 40, 40);
+    ctx.beginPath();
+    ctx.moveTo(-20, -20); ctx.lineTo(20, 20);
+    ctx.moveTo(20, -20); ctx.lineTo(-20, 20);
+    ctx.stroke();
+
+    // Cracks if low HP
+    if (this.hp < this.maxHp * 0.5) {
+      ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(-10, -5); ctx.lineTo(-15, 5); ctx.lineTo(-8, 12);
+      ctx.moveTo(12, -12); ctx.lineTo(5, -5); ctx.lineTo(15, 8);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+}
+
+// =============================================================================
 // 9. DUNGEON GENERATOR — BSP Tree
 // =============================================================================
 class BSPNode {
@@ -457,6 +575,7 @@ class DungeonGenerator {
       map, mapW, mapH,
       rooms,
       torches : rooms.flatMap(r => r.torches),
+      crates  : rooms.flatMap(r => r.crates),
       items   : [],
       decals  : [],
       spawnRoom: rooms.find(r => r.type === ROOM_SPAWN),
@@ -497,6 +616,7 @@ class DungeonGenerator {
         cy: y + (h >> 1),
         torches: [],
         obstacles: [],
+        crates: [],
         enemies: [],
         connected: [],
       };
@@ -654,6 +774,18 @@ class DungeonGenerator {
       }
     }
 
+    // Crates — random spots in room
+    if (room.type !== ROOM_SPAWN) {
+      const crateCount = rng.int(1, 4);
+      for (let i = 0; i < crateCount; i++) {
+        const cx = rng.int(room.x + 1, room.x + room.w - 1);
+        const cy = rng.int(room.y + 1, room.y + room.h - 1);
+        if (map[cy * mapW + cx] === TILE_FLOOR) {
+          room.crates.push(new Crate(cx * TILE + TILE / 2, cy * TILE + TILE / 2));
+        }
+      }
+    }
+
     // Enemy types per room type
     const types = Object.keys(ENEMY_DEFS);
     let pool = [];
@@ -773,48 +905,99 @@ class Projectile {
 // =============================================================================
 // 11. ITEM / PICKUP
 // =============================================================================
+class FloatingText {
+  constructor(x, y, text, color) {
+    this.x = x; this.y = y; this.text = text; this.color = color;
+    this.life = 1.0; this.maxLife = 1.0;
+    this.alive = true;
+  }
+  update(dt) {
+    this.y -= 30 * dt;
+    this.life -= dt;
+    if (this.life <= 0) this.alive = false;
+  }
+  draw(ctx) {
+    ctx.save();
+    ctx.globalAlpha = this.life / this.maxLife;
+    ctx.fillStyle = this.color;
+    ctx.font = 'bold 14px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(this.text, this.x, this.y);
+    ctx.restore();
+  }
+}
+
 class Item {
-  constructor(type, x, y) {
+  constructor(type, x, y, opts = {}) {
     this.type   = type;
     this.x = x; this.y = y;
     this.alive  = true;
     this.radius = 16;
     this.bobT   = Math.random() * Math.PI * 2;
+    this.despawnTimer = 12.0;
+    this.ammoType = opts.ammoType || 'PISTOL'; // PISTOL, SHOTGUN, SMG
+    this.ammoAmount = opts.ammoAmount || 10;
+    
     switch (type) {
-      case 'POTION': this.color = '#ff4488'; this.label = '+HP'; break;
-      case 'AMMO':   this.color = '#44aaff'; this.label = 'AMMO'; break;
+      case 'POTION': this.color = '#ff4488'; this.label = 'HP'; break;
+      case 'AMMO': {
+        this.color = '#44aaff';
+        this.label = this.ammoType.slice(0, 1);
+        if (this.ammoType === 'SHOTGUN') this.color = '#ff8800';
+        if (this.ammoType === 'SMG')     this.color = '#00ff88';
+        break;
+      }
       case 'ARMOR':  this.color = '#8888ff'; this.label = 'ARM'; break;
+      case 'BUFF_DMG': this.color = '#ff4400'; this.label = 'DMG+'; break;
+      case 'BUFF_SPD': this.color = '#ffff00'; this.label = 'SPD+'; break;
       default:       this.color = '#ffcc00'; this.label = '?';
     }
   }
 
-  update(dt) { this.bobT += dt * 2.5; }
+  update(dt) {
+    this.bobT += dt * 2.5;
+    this.despawnTimer -= dt;
+    if (this.despawnTimer <= 0) this.alive = false;
+  }
 
   draw(ctx) {
-    const bob = Math.sin(this.bobT) * 4;
+    const bob = Math.sin(this.bobT) * 6;
     const y   = this.y + bob;
     const pulse = 0.7 + Math.sin(this.bobT * 1.3) * 0.3;
+    const blink = this.despawnTimer < 3 ? (Math.sin(Date.now() * 0.015) > 0 ? 1 : 0.3) : 1;
 
     ctx.save();
+    ctx.globalAlpha = blink;
+    
+    // Glow
     ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = 0.25 * pulse;
-    const g = ctx.createRadialGradient(this.x, y, 0, this.x, y, this.radius * 2.5);
+    ctx.globalAlpha = 0.3 * pulse * blink;
+    const g = ctx.createRadialGradient(this.x, y, 0, this.x, y, this.radius * 3);
     g.addColorStop(0, this.color);
     g.addColorStop(1, 'transparent');
     ctx.fillStyle = g;
     ctx.beginPath();
-    ctx.arc(this.x, y, this.radius * 2.5, 0, Math.PI * 2);
+    ctx.arc(this.x, y, this.radius * 3, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = 1;
+    ctx.globalAlpha = 1.0 * blink;
+    
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.beginPath();
+    ctx.ellipse(this.x, this.y + 12, this.radius * 0.8, this.radius * 0.3, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Core
     ctx.fillStyle   = this.color;
     ctx.beginPath();
     ctx.arc(this.x, y, this.radius * 0.7, 0, Math.PI * 2);
     ctx.fill();
 
+    // Icon/Label
     ctx.fillStyle    = '#ffffff';
-    ctx.font         = 'bold 9px monospace';
+    ctx.font         = 'bold 10px monospace';
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(this.label, this.x, y);
@@ -932,6 +1115,13 @@ class Player {
     this.hitFlash     = 0;
     this.walkT        = 0;
     this.idleT        = Math.random() * Math.PI * 2;
+
+    this.weaponPopupTimer = 0;
+    this.weaponScale = 1;
+
+    this.buffDmg = 0;
+    this.buffSpd = 0;
+    this.stunTimer = 0;
   }
 
   get weapon() { return this.weapons[this.weaponIdx]; }
@@ -956,6 +1146,12 @@ class Player {
     this.hitFlash      = Math.max(0, this.hitFlash      - dt);
     this.dashCd        = Math.max(0, this.dashCd        - dt);
     this.shieldCd      = Math.max(0, this.shieldCd      - dt);
+    this.weaponPopupTimer = Math.max(0, this.weaponPopupTimer - dt);
+    this.weaponScale = lerp(this.weaponScale, 1, 1 - Math.pow(0.001, dt));
+    
+    this.buffDmg = Math.max(0, this.buffDmg - dt);
+    this.buffSpd = Math.max(0, this.buffSpd - dt);
+    this.stunTimer = Math.max(0, this.stunTimer - dt);
 
     if (this.shieldActive) {
       this.shieldTimer -= dt;
@@ -974,8 +1170,9 @@ class Player {
     const mw = game.camera.toWorld(input.mouse.x, input.mouse.y);
     this.facing = Math.atan2(mw.y - this.y, mw.x - this.x);
 
-    if (input.justPressed('KeyQ')) this._switchWeapon(-1);
-    if (input.justPressed('KeyE')) this._switchWeapon(1);
+    const wheel = input.getWheel();
+    if (wheel !== 0) this._switchWeapon(wheel);
+    
     if (input.justPressed('Digit1')) this.weaponIdx = 0;
     if (input.justPressed('Digit2')) this.weaponIdx = 1;
     if (input.justPressed('Digit3')) this.weaponIdx = 2;
@@ -1010,6 +1207,9 @@ class Player {
   _switchWeapon(dir) {
     this.weaponIdx = ((this.weaponIdx + dir) + this.weapons.length) % this.weapons.length;
     this.fireCooldown = 0.1;
+    this.weaponPopupTimer = 1.2;
+    this.weaponScale = 1.35;
+    // Sound stub: playWeaponClick();
   }
 
   _fire(game) {
@@ -1022,6 +1222,8 @@ class Player {
     const ox = Math.cos(baseAngle) * (this.radius + 6);
     const oy = Math.sin(baseAngle) * (this.radius + 6);
 
+    const dmg = this.buffDmg > 0 ? w.damage * 1.5 : w.damage;
+
     for (let i = 0; i < w.pellets; i++) {
       const a = baseAngle + (Math.random() - 0.5) * w.spread;
       const proj = game.projPool.get();
@@ -1029,7 +1231,7 @@ class Player {
         this.x + ox, this.y + oy,
         Math.cos(a) * w.bulletSpeed,
         Math.sin(a) * w.bulletSpeed,
-        w.damage, w.color, 'player', w.range
+        dmg, w.color, 'player', w.range
       );
       game.projectiles.push(proj);
     }
@@ -1056,6 +1258,8 @@ class Player {
 
     const arcR = this.weapon.range;
     const half  = Math.PI * 0.45;
+    const dmg = this.buffDmg > 0 ? this.weapon.damage * 1.5 : this.weapon.damage;
+
     for (const e of game.enemies) {
       if (!e.alive) continue;
       const d = dist2(this.x, this.y, e.x, e.y);
@@ -1065,13 +1269,29 @@ class Player {
       while (diff >  Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
       if (Math.abs(diff) < half) {
-        e.takeDamage(this.weapon.damage, game);
+        e.takeDamage(dmg, game);
         const [kx, ky] = vecNorm(e.x - this.x, e.y - this.y);
         e.vx += kx * this.weapon.knockback;
         e.vy += ky * this.weapon.knockback;
         game.triggerHitStop();
         game.camera.shake(5, 0.12);
         game.particles.burst(e.x, e.y, 8, { color: '#ffffff', type: 'spark', speed: 120, life: 0.2 });
+      }
+    }
+
+    // Crates
+    for (const c of game.dungeon.crates) {
+      if (!c.alive) continue;
+      const d = dist2(this.x, this.y, c.x, c.y);
+      if (d > arcR + c.radius) continue;
+      const angle = Math.atan2(c.y - this.y, c.x - this.x);
+      let diff = angle - this.facing;
+      while (diff >  Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      if (Math.abs(diff) < half) {
+        c.takeDamage(dmg, game);
+        game.triggerHitStop();
+        game.camera.shake(4, 0.12);
       }
     }
 
@@ -1106,12 +1326,17 @@ class Player {
       const friction = Math.pow(0.008, dt);
       let dx = input.moveX, dy = input.moveY;
       if (dx !== 0 && dy !== 0) { dx *= 0.707; dy *= 0.707; }
-      this.vx += dx * accel * dt;
-      this.vy += dy * accel * dt;
+      
+      let speedMult = this.buffSpd > 0 ? 1.4 : 1;
+      if (this.stunTimer > 0) speedMult *= 0.4;
+      
+      this.vx += dx * accel * dt * speedMult;
+      this.vy += dy * accel * dt * speedMult;
       this.vx *= friction;
       this.vy *= friction;
       const spd = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
-      if (spd > 200) { this.vx = this.vx / spd * 200; this.vy = this.vy / spd * 200; }
+      const maxSpd = 200 * speedMult;
+      if (spd > maxSpd) { this.vx = this.vx / spd * maxSpd; this.vy = this.vy / spd * maxSpd; }
     }
 
     this.x += this.vx * dt;
@@ -1486,11 +1711,20 @@ class Enemy {
     if (Math.random() < dropChance) {
       game.dungeon.items.push(new Item('POTION', this.x, this.y));
     }
-    if (Math.random() < 0.2) {
-      game.dungeon.items.push(new Item('AMMO', this.x + 20, this.y));
+    
+    // Ammo drop based on enemy type
+    if (Math.random() < 0.25) {
+      let ammoType = 'PISTOL';
+      let amount = 12;
+      if (this.type === 'ARCHER') { ammoType = 'SHOTGUN'; amount = 4; }
+      else if (this.type === 'WRAITH') { ammoType = 'SMG'; amount = 25; }
+      else if (this.type === 'OGRE') { ammoType = 'SHOTGUN'; amount = 8; }
+      
+      game.dungeon.items.push(new Item('AMMO', this.x, this.y, { ammoType, ammoAmount: amount }));
     }
+    
     if (Math.random() < 0.08) {
-      game.dungeon.items.push(new Item('ARMOR', this.x - 20, this.y));
+      game.dungeon.items.push(new Item('ARMOR', this.x, this.y));
     }
   }
 
@@ -1676,9 +1910,10 @@ class Ogre extends Enemy {
   constructor(x, y, level, game) {
     super('OGRE', x, y, level, game);
     this.telegraphTimer = 0;
-    this.telegraphRadius = 0;
+    this.telegraphRadius = 130;
     this.shockwaveActive = false;
     this.shockwaveR = 0;
+    this.hasDamagedThisSmash = false;
   }
 
   _doAttack(dt, player, dungeon, game, distToPlayer) {
@@ -1693,36 +1928,56 @@ class Ogre extends Enemy {
       }
     }
 
-    if (distToPlayer < 100 && this.attackCd <= 0 && this.state !== 'special') {
-      this._setState('special', 1.2);
-      this.telegraphTimer = 1.2;
-      this.telegraphRadius = 0;
-      this.shockwaveActive = false;
-      this.attackCd = 3.5;
+    // Regular melee range check
+    if (distToPlayer < this.radius + player.radius + 15 && this.attackCd <= 0) {
+      player.takeDamage(this.damage * 0.5, game);
+      const [kx, ky] = vecNorm(player.x - this.x, player.y - this.y);
+      player.vx += kx * 250; player.vy += ky * 250;
+      this.attackCd = 1.5;
+      game.camera.shake(4, 0.15);
     }
+
+    // Special Smash
+    if (distToPlayer < 140 && this.attackCd <= 0 && this.state !== 'special') {
+      this._setState('special', 1.4);
+      this.telegraphTimer = 1.0;
+      this.shockwaveActive = false;
+      this.hasDamagedThisSmash = false;
+      this.attackCd = 4.0;
+    }
+    
     if (this.hp / this.maxHp < 0.2 && this.state === 'chase') {
       this._setState('retreat', 3);
     }
   }
 
   _doSpecial(dt, player, dungeon, game, distToPlayer) {
-    this.telegraphTimer -= dt;
-    this.telegraphRadius = (1 - this.telegraphTimer / 1.2) * 120;
-
-    if (this.telegraphTimer <= 0 && !this.shockwaveActive) {
-      this.shockwaveActive = true;
-      this.shockwaveR = 0;
-      game.camera.shake(8, 0.3);
-      game.particles.burst(this.x, this.y, 20, { color: COLORS.ogre, type: 'spark', speed: 200, life: 0.4 });
+    if (this.telegraphTimer > 0) {
+      this.telegraphTimer -= dt;
+      if (this.telegraphTimer <= 0) {
+        this.shockwaveActive = true;
+        this.shockwaveR = 0;
+        game.camera.shake(12, 0.4);
+        game.particles.burst(this.x, this.y, 30, { color: COLORS.ogre, type: 'spark', speed: 250, life: 0.5 });
+      }
     }
 
     if (this.shockwaveActive) {
-      this.shockwaveR += 180 * dt;
-      if (dist2(this.x, this.y, player.x, player.y) < this.shockwaveR + player.radius) {
+      this.shockwaveR += 350 * dt;
+      const d = dist2(this.x, this.y, player.x, player.y);
+      if (!this.hasDamagedThisSmash && d < this.telegraphRadius + player.radius) {
         player.takeDamage(this.damage, game);
-        this.shockwaveActive = false;
+        // Knockback
+        const [kx, ky] = vecNorm(player.x - this.x, player.y - this.y);
+        player.vx += kx * 450;
+        player.vy += ky * 450;
+        // Stun (slow)
+        player.buffSpd = -0.4; // I'll handle negative speed buff as slow
+        player.stunTimer = 0.4;
+        this.hasDamagedThisSmash = true;
+        game.camera.shake(10, 0.25);
       }
-      if (this.shockwaveR > 120) this.shockwaveActive = false;
+      if (this.shockwaveR > this.telegraphRadius) this.shockwaveActive = false;
     }
   }
 
@@ -1819,16 +2074,23 @@ class Ogre extends Enemy {
     ctx.restore();
 
     // Telegraph circle
-    if (this.state === 'special' && this.telegraphRadius > 0 && !this.shockwaveActive) {
+    if (this.state === 'special' && this.telegraphTimer > 0) {
       ctx.save();
       ctx.strokeStyle = '#ff2200';
-      ctx.lineWidth = 2;
-      ctx.globalAlpha = 0.7;
-      ctx.setLineDash([4, 4]);
+      ctx.lineWidth = 3;
+      ctx.globalAlpha = 0.6 + Math.sin(Date.now() * 0.015) * 0.4;
       ctx.beginPath();
       ctx.arc(this.x, this.y, this.telegraphRadius, 0, Math.PI * 2);
       ctx.stroke();
-      ctx.setLineDash([]);
+      
+      // Fill progress
+      ctx.globalAlpha = 0.2;
+      ctx.fillStyle = '#ff2200';
+      ctx.beginPath();
+      ctx.moveTo(this.x, this.y);
+      ctx.arc(this.x, this.y, this.telegraphRadius, 0, Math.PI * 2 * (1 - this.telegraphTimer / 1.0));
+      ctx.closePath();
+      ctx.fill();
       ctx.restore();
     }
 
@@ -1836,8 +2098,8 @@ class Ogre extends Enemy {
     if (this.shockwaveActive && this.shockwaveR > 0) {
       ctx.save();
       ctx.strokeStyle = '#ff4400';
-      ctx.lineWidth = 4;
-      ctx.globalAlpha = Math.max(0, 1 - this.shockwaveR / 120);
+      ctx.lineWidth = 6;
+      ctx.globalAlpha = Math.max(0, 1 - this.shockwaveR / this.telegraphRadius);
       ctx.beginPath();
       ctx.arc(this.x, this.y, this.shockwaveR, 0, Math.PI * 2);
       ctx.stroke();
@@ -2241,7 +2503,7 @@ class Renderer {
     }
 
     // Y-sort and draw entities
-    const entities = [...enemies.filter(e => e.alive), player].sort((a, b) => a.y - b.y);
+    const entities = [...enemies.filter(e => e.alive), ...dungeon.crates.filter(c => c.alive), player].sort((a, b) => a.y - b.y);
     for (const e of entities) {
       if (e instanceof Player) e.draw(this.worldCtx, game);
       else e.draw(this.worldCtx, game);
@@ -2252,6 +2514,9 @@ class Renderer {
 
     // Particles
     particles.draw(this.worldCtx);
+
+    // Floating texts
+    for (const ft of game.floatingTexts) ft.draw(this.worldCtx);
 
     camera.restore(this.worldCtx);
 
@@ -2490,16 +2755,36 @@ function renderUI(ctx, game, now) {
     for (let i = 0; i < p.weapons.length; i++) {
       const sw = p.weapons[i];
       const sx = wx - 90 + i * 60, sy = wy - 30;
-      ctx.strokeStyle = i === p.weaponIdx ? sw.color : '#444';
-      ctx.lineWidth   = i === p.weaponIdx ? 2 : 1;
-      ctx.globalAlpha = i === p.weaponIdx ? 1 : 0.5;
-      roundRect(ctx, sx - 22, sy - 8, 44, 16, 3); ctx.stroke();
-      ctx.fillStyle   = i === p.weaponIdx ? sw.color : '#888';
+      const isCur = i === p.weaponIdx;
+      const scale = isCur ? p.weaponScale : 1;
+      
+      ctx.save();
+      ctx.translate(sx, sy);
+      ctx.scale(scale, scale);
+      
+      ctx.strokeStyle = isCur ? sw.color : '#444';
+      ctx.lineWidth   = isCur ? 2 : 1;
+      ctx.globalAlpha = isCur ? 1 : 0.5;
+      roundRect(ctx, -22, -8, 44, 16, 3); ctx.stroke();
+      ctx.fillStyle   = isCur ? sw.color : '#888';
       ctx.font        = '9px monospace';
       ctx.textAlign   = 'center';
       ctx.textBaseline= 'middle';
-      ctx.fillText(sw.name.slice(0, 3).toUpperCase(), sx, sy);
+      ctx.fillText(sw.name.slice(0, 3).toUpperCase(), 0, 0);
+      ctx.restore();
       ctx.globalAlpha = 1;
+    }
+
+    // Weapon popup name
+    if (p.weaponPopupTimer > 0) {
+      const alpha = Math.min(1, p.weaponPopupTimer / 0.3);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = p.weapon.color;
+      ctx.font = 'bold 24px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(p.weapon.name.toUpperCase(), CANVAS_W / 2, CANVAS_H / 2 + 100);
+      ctx.restore();
     }
 
     // --- TOP RIGHT: Level + Enemies ---
@@ -2577,7 +2862,7 @@ function renderUI(ctx, game, now) {
     ctx.globalAlpha = 1;
 
     // Stats
-    const elapsed  = Math.floor((Date.now() - game.startTime) / 1000);
+    const elapsed  = Math.floor(game.survivalTime);
     const minutes  = Math.floor(elapsed / 60);
     const seconds  = elapsed % 60;
     const statColor = '#aaccff';
@@ -2637,13 +2922,14 @@ class Game {
     this.seed       = Date.now();
     this.rng        = new RNG(this.seed);
     this.kills      = 0;
-    this.startTime  = Date.now();
+    this.survivalTime = 0;
 
     this.dungeon    = null;
     this.player     = null;
     this.enemies    = [];
     this.projectiles = [];
     this.explosions  = [];
+    this.floatingTexts = [];
     this.muzzleFlash = { active: false };
 
     this.particles   = new ParticleSystem(2000);
@@ -2703,6 +2989,7 @@ class Game {
 
     this.explosions = [];
     this.projectiles = [];
+    this.floatingTexts = [];
     this.camera.x = sx - CANVAS_W / 2;
     this.camera.y = sy - CANVAS_H / 2;
     this.levelFlashTimer = 1.2;
@@ -2746,16 +3033,45 @@ class Game {
 
   _checkPickups() {
     const p = this.player;
-    for (const item of this.dungeon.items) {
-      if (!item.alive) continue;
-      if (dist2(p.x, p.y, item.x, item.y) < p.radius + item.radius) {
-        item.alive = false;
-        switch (item.type) {
-          case 'POTION': p.hp = Math.min(p.maxHp, p.hp + 35); break;
-          case 'AMMO':   { const w = p.weapon; if (w.pellets > 0) w.ammo = Math.min(w.ammoMax, w.ammo + Math.floor(w.ammoMax * 0.5)); break; }
-          case 'ARMOR':  p.armor = Math.min(p.maxArmor, p.armor + 20); break;
+    const interact = this.input.justPressed('KeyE');
+    
+    for (let i = this.dungeon.items.length - 1; i >= 0; i--) {
+      const item = this.dungeon.items[i];
+      if (!item.alive) { this.dungeon.items.splice(i, 1); continue; }
+      
+      const d = dist2(p.x, p.y, item.x, item.y);
+      if (d < p.radius + item.radius + 15) {
+        // If it's a potion, armor or buff, pick up on touch. 
+        // If it's ammo, pick up with E.
+        let picked = false;
+        let text = '';
+        
+        if (item.type === 'AMMO') {
+          if (interact) {
+            const w = p.weapons.find(w => w.name.toUpperCase() === item.ammoType);
+            if (w && w.ammo < w.ammoMax) {
+              const add = Math.min(item.ammoAmount, w.ammoMax - w.ammo);
+              w.ammo += add;
+              text = '+' + add + ' ' + w.name.toUpperCase();
+              picked = true;
+            }
+          }
+        } else if (item.type === 'POTION' || item.type === 'ARMOR' || item.type.startsWith('BUFF')) {
+          if (item.type === 'POTION') { p.hp = Math.min(p.maxHp, p.hp + 35); text = '+35 HP'; }
+          else if (item.type === 'ARMOR') { p.armor = Math.min(p.maxArmor, p.armor + 20); text = '+20 ARMOR'; }
+          else if (item.type === 'BUFF_DMG') { p.buffDmg = 10.0; text = 'DMG BOOST!'; }
+          else if (item.type === 'BUFF_SPD') { p.buffSpd = 8.0; text = 'SPD BOOST!'; }
+          picked = true;
         }
-        this.particles.burst(p.x, p.y, 8, { color: item.color, type: 'glow', speed: 50, life: 0.3 });
+
+        if (picked) {
+          item.alive = false;
+          this.dungeon.items.splice(i, 1);
+          this.particles.burst(item.x, item.y, 12, { color: item.color, type: 'glow', speed: 60, life: 0.4 });
+          if (text) {
+            this.floatingTexts.push(new FloatingText(item.x, item.y - 20, text, item.color));
+          }
+        }
       }
     }
   }
@@ -2770,8 +3086,8 @@ class Game {
     this.rng       = new RNG(this.seed);
     this.level     = 1;
     this.kills     = 0;
-    this.startTime = Date.now();
-    this.player    = null;
+    this.survivalTime = 0;
+    this.player     = null;
     this.enemies   = [];
     this.projectiles = [];
     this.explosions  = [];
@@ -2783,6 +3099,7 @@ class Game {
 
   update(dt) {
     if (this.state === 'GAME_OVER') return;
+    this.survivalTime += dt;
 
     // Hit stop time scale
     const eff = this.hitStopTimer > 0 ? dt * 0.06 : dt;
@@ -2820,6 +3137,7 @@ class Game {
 
       // Hit detection
       if (proj.owner === 'player') {
+        // Enemies
         for (const e of this.enemies) {
           if (!e.alive) continue;
           if (dist2(proj.x, proj.y, e.x, e.y) < proj.radius + e.radius) {
@@ -2828,11 +3146,22 @@ class Game {
             this.camera.shake(2, 0.08);
             this.particles.burst(proj.x, proj.y, 6, { color: proj.color, type: 'spark', speed: 90, life: 0.2 });
             proj.alive = false;
-            this.projectiles.splice(i, 1);
-            this.projPool.free(proj);
             break;
           }
         }
+        if (!proj.alive) { this.projectiles.splice(i, 1); this.projPool.free(proj); continue; }
+        
+        // Crates
+        for (const c of this.dungeon.crates) {
+          if (!c.alive) continue;
+          if (dist2(proj.x, proj.y, c.x, c.y) < proj.radius + c.radius) {
+            c.takeDamage(proj.damage, this);
+            this.camera.shake(1.5, 0.08);
+            proj.alive = false;
+            break;
+          }
+        }
+        if (!proj.alive) { this.projectiles.splice(i, 1); this.projPool.free(proj); continue; }
       } else {
         // Enemy projectile → player
         if (dist2(proj.x, proj.y, this.player.x, this.player.y) < proj.radius + this.player.radius) {
@@ -2850,11 +3179,20 @@ class Game {
       if (this.explosions[i].timer <= 0) this.explosions.splice(i, 1);
     }
 
+    // Floating texts
+    for (let i = this.floatingTexts.length - 1; i >= 0; i--) {
+      this.floatingTexts[i].update(dt);
+      if (!this.floatingTexts[i].alive) this.floatingTexts.splice(i, 1);
+    }
+
     // Particles
     this.particles.update(eff);
 
     // Items
     for (const item of this.dungeon.items) item.update(eff);
+
+    // Crates
+    for (const c of this.dungeon.crates) c.update(eff);
 
     this._checkPickups();
     this._checkLevelComplete();
