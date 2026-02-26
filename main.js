@@ -10,7 +10,8 @@
 // =============================================================================
 const CANVAS_W = 1280;
 const CANVAS_H = 720;
-const TILE     = 48;
+const TILE           = 48;
+const PLAYER_PADDING = 3; // extra wall clearance in pixels
 
 const COLORS = {
   player  : '#00ffff',
@@ -27,6 +28,31 @@ const COLORS = {
   wall    : '#0a1520',
   corridor: '#0f0f22',
 };
+
+// Theme rotation — one theme per 5-level band, cycling over 20 levels
+const THEMES = [
+  { // 1-5: Stone Dungeon (default)
+    name:'Stone Dungeon', floor1:'#12121f', floor2:'#14142a', wall:'#0a1520',
+    wallGlow:'rgba(0,200,255,0.09)', ambient:'rgba(0,0,15,0.93)',
+    torchA:'#ffaa44', torchB:'#ff6600', decal:'rgba(255,255,255,0.03)',
+  },
+  { // 6-10: Lava Cavern
+    name:'Lava Cavern', floor1:'#1f0e00', floor2:'#2a1200', wall:'#1a0800',
+    wallGlow:'rgba(255,100,0,0.12)', ambient:'rgba(15,4,0,0.93)',
+    torchA:'#ff4400', torchB:'#ff2200', decal:'rgba(255,80,0,0.04)',
+  },
+  { // 11-15: Frozen Crypt
+    name:'Frozen Crypt', floor1:'#0a141f', floor2:'#0d1a2a', wall:'#061020',
+    wallGlow:'rgba(0,200,255,0.15)', ambient:'rgba(0,5,20,0.93)',
+    torchA:'#44ccff', torchB:'#0088cc', decal:'rgba(100,200,255,0.04)',
+  },
+  { // 16-20: Shadow Realm
+    name:'Shadow Realm', floor1:'#0d0014', floor2:'#140020', wall:'#080010',
+    wallGlow:'rgba(180,0,255,0.14)', ambient:'rgba(5,0,15,0.97)',
+    torchA:'#cc44ff', torchB:'#8800cc', decal:'rgba(180,0,255,0.04)',
+  },
+];
+function getTheme(level) { return THEMES[Math.floor(((level - 1) % 20) / 5)]; }
 
 const WEAPON_DEFS = {
   PISTOL  : { name:'Pistol',   damage:18, fireRate:0.28, bulletSpeed:520, ammoMax:30,  pellets:1, spread:0.04, color:'#00ffff',  range:600, knockback:80  },
@@ -61,11 +87,16 @@ const PERK_DEFS = {
   RELOAD   : { name:'+10% RELOAD',   color:'#88ff00', icon:'RL' },
 };
 
-const ROOM_SPAWN  = 'spawn';
-const ROOM_EXIT   = 'exit';
-const ROOM_COMBAT = 'combat';
-const ROOM_LOOT   = 'loot';
-const ROOM_BOSS   = 'boss';
+const ROOM_SPAWN    = 'spawn';
+const ROOM_EXIT     = 'exit';
+const ROOM_COMBAT   = 'combat';
+const ROOM_LOOT     = 'loot';
+const ROOM_BOSS     = 'boss';
+const ROOM_TRAP     = 'trap';     // periodic spike damage
+const ROOM_DARK     = 'dark';     // reduced vision radius
+const ROOM_ELITE    = 'elite';    // all enemies forced-elite
+const ROOM_TIMED    = 'timed';    // 20s survive for bonus loot
+const ROOM_TREASURE = 'treasure'; // no enemies, 3 free items
 
 // =============================================================================
 // 2. SEEDED PRNG — Mulberry32
@@ -806,6 +837,17 @@ class DungeonGenerator {
       if (i % 5 === 3) r.type = ROOM_BOSS;
       else if (i % 5 === 1) r.type = ROOM_LOOT;
     });
+
+    // Add variety room types to remaining COMBAT rooms
+    rooms.forEach(r => {
+      if (r.type !== ROOM_COMBAT) return;
+      const roll = this.rng.next();
+      if      (roll < 0.12)                          r.type = ROOM_TRAP;
+      else if (roll < 0.20)                          r.type = ROOM_DARK;
+      else if (roll < 0.28 && this.level >= 4)       r.type = ROOM_ELITE;
+      else if (roll < 0.34 && this.level >= 6)       r.type = ROOM_TIMED;
+      else if (roll < 0.40)                          r.type = ROOM_TREASURE;
+    });
   }
 
   _placeRoomContent(room, map, mapW) {
@@ -856,10 +898,42 @@ class DungeonGenerator {
     const types = Object.keys(ENEMY_DEFS);
     let pool = [];
     switch (room.type) {
-      case ROOM_SPAWN: break;
-      case ROOM_EXIT:  break;
-      case ROOM_LOOT:  pool = [rng.pick(['GOBLIN']), rng.pick(['ARCHER'])]; break;
-      case ROOM_BOSS:  pool = ['OGRE', rng.pick(types), rng.pick(types)]; break;
+      case ROOM_SPAWN:    break;
+      case ROOM_EXIT:     break;
+      case ROOM_LOOT:     pool = [rng.pick(['GOBLIN']), rng.pick(['ARCHER'])]; break;
+      case ROOM_BOSS:     pool = ['OGRE', rng.pick(types), rng.pick(types)]; break;
+      case ROOM_TREASURE: {
+        // No enemies; treasure items placed after enemy loop below
+        room.isTreasure = true;
+        break;
+      }
+      case ROOM_TRAP: {
+        // Trap room: slightly fewer enemies, periodic spike hazard
+        room.trapCd = 1.5;
+        const n = 1 + Math.floor(this.level / 3) + rng.int(0, 2);
+        for (let i = 0; i < n; i++) pool.push(rng.pick(types));
+        break;
+      }
+      case ROOM_DARK: {
+        // Dark room: standard enemies
+        const n = 2 + Math.floor(this.level / 2) + rng.int(0, 3);
+        for (let i = 0; i < n; i++) pool.push(rng.pick(types));
+        break;
+      }
+      case ROOM_ELITE: {
+        // All enemies in this room will be forced-elite
+        room.forceElite = true;
+        const n = 2 + Math.floor(this.level / 3) + rng.int(0, 2);
+        for (let i = 0; i < n; i++) pool.push(rng.pick(types));
+        break;
+      }
+      case ROOM_TIMED: {
+        // Timed survival challenge
+        room.timedChallenge = { duration: 20, started: false, complete: false };
+        const n = 3 + Math.floor(this.level / 3) + rng.int(0, 2);
+        for (let i = 0; i < n; i++) pool.push(rng.pick(types));
+        break;
+      }
       default: {
         const n = 2 + Math.floor(this.level / 2) + rng.int(0, 3);
         for (let i = 0; i < n; i++) pool.push(rng.pick(types));
@@ -1075,7 +1149,8 @@ class Item {
 // =============================================================================
 // 12. TILE RENDERER
 // =============================================================================
-function renderTiles(ctx, dungeon) {
+function renderTiles(ctx, dungeon, theme) {
+  if (!theme) theme = THEMES[0];
   const { map, mapW, mapH } = dungeon;
   ctx.clearRect(0, 0, mapW * TILE, mapH * TILE);
 
@@ -1087,7 +1162,7 @@ function renderTiles(ctx, dungeon) {
       const px = tx * TILE, py = ty * TILE;
 
       if (t === TILE_FLOOR || t === TILE_CORR) {
-        const shade = ((tx + ty) & 1) === 0 ? COLORS.floor1 : COLORS.floor2;
+        const shade = ((tx + ty) & 1) === 0 ? theme.floor1 : theme.floor2;
         ctx.fillStyle = shade;
         ctx.fillRect(px, py, TILE, TILE);
 
@@ -1096,11 +1171,11 @@ function renderTiles(ctx, dungeon) {
         ctx.strokeRect(px, py, TILE, TILE);
 
         if ((tx * 7 + ty * 13) % 11 === 0) {
-          ctx.fillStyle = 'rgba(255,255,255,0.03)';
+          ctx.fillStyle = theme.decal;
           ctx.fillRect(px + 10, py + 10, 3, 3);
         }
       } else if (t === TILE_WALL) {
-        ctx.fillStyle = COLORS.wall;
+        ctx.fillStyle = theme.wall;
         ctx.fillRect(px, py, TILE, TILE);
 
         ctx.fillStyle = 'rgba(255,255,255,0.12)';
@@ -1114,27 +1189,102 @@ function renderTiles(ctx, dungeon) {
 
         const above = map[(ty - 1) * mapW + tx];
         if (above === TILE_FLOOR || above === TILE_CORR) {
-          ctx.fillStyle = 'rgba(0,200,255,0.09)';
+          ctx.fillStyle = theme.wallGlow;
           ctx.fillRect(px, py, TILE, 4);
         }
       }
     }
   }
 
+  // Room type overlays
+  for (const room of dungeon.rooms) {
+    if (room.type === ROOM_TRAP) {
+      ctx.fillStyle = 'rgba(255,60,0,0.07)';
+      ctx.fillRect(room.x * TILE, room.y * TILE, room.w * TILE, room.h * TILE);
+    } else if (room.type === ROOM_DARK) {
+      ctx.fillStyle = 'rgba(20,0,40,0.18)';
+      ctx.fillRect(room.x * TILE, room.y * TILE, room.w * TILE, room.h * TILE);
+    } else if (room.type === ROOM_TIMED) {
+      ctx.fillStyle = 'rgba(255,200,0,0.05)';
+      ctx.fillRect(room.x * TILE, room.y * TILE, room.w * TILE, room.h * TILE);
+    } else if (room.type === ROOM_TREASURE) {
+      ctx.fillStyle = 'rgba(80,255,120,0.06)';
+      ctx.fillRect(room.x * TILE, room.y * TILE, room.w * TILE, room.h * TILE);
+    }
+  }
+
+  // Staircase static parts in exit room
   const exit = dungeon.exitRoom;
   if (exit) {
+    const cx = exit.cx * TILE + TILE / 2;
+    const cy = exit.cy * TILE + TILE / 2;
+    const r  = Math.min(exit.w, exit.h) * TILE * 0.35;
+
     ctx.save();
-    ctx.globalAlpha = 0.18;
-    ctx.fillStyle   = '#00ff88';
-    ctx.fillRect(exit.x * TILE, exit.y * TILE, exit.w * TILE, exit.h * TILE);
-    ctx.globalAlpha = 0.9;
-    ctx.fillStyle   = '#00ff88';
-    ctx.font        = 'bold 22px monospace';
-    ctx.textAlign   = 'center';
-    ctx.textBaseline= 'middle';
-    ctx.fillText('EXIT', exit.cx * TILE + TILE / 2, exit.cy * TILE + TILE / 2);
+    // Pit gradient
+    const pit = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+    pit.addColorStop(0,   'rgba(0,0,0,0.96)');
+    pit.addColorStop(0.6, 'rgba(10,10,30,0.88)');
+    pit.addColorStop(1,   'rgba(30,30,60,0.4)');
+    ctx.fillStyle = pit;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+
+    // Stone rim
+    ctx.strokeStyle = '#707070';
+    ctx.lineWidth   = 5;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+
+    // Outer decorative ring
+    ctx.strokeStyle = 'rgba(0,255,180,0.25)';
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath(); ctx.arc(cx, cy, r + 5, 0, Math.PI * 2); ctx.stroke();
     ctx.restore();
   }
+}
+
+// Draw animated staircase elements (rune ring + light beam) each frame on worldCtx
+function renderStaircaseAnimated(ctx, exit, now) {
+  const cx = exit.cx * TILE + TILE / 2;
+  const cy = exit.cy * TILE + TILE / 2;
+  const r  = Math.min(exit.w, exit.h) * TILE * 0.35;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  // Light beam (additive)
+  ctx.globalCompositeOperation = 'lighter';
+  const beam = ctx.createLinearGradient(0, -r, 0, r);
+  beam.addColorStop(0,   'transparent');
+  beam.addColorStop(0.4, 'rgba(80,200,255,0.12)');
+  beam.addColorStop(0.5, 'rgba(140,255,255,0.25)');
+  beam.addColorStop(0.6, 'rgba(80,200,255,0.12)');
+  beam.addColorStop(1,   'transparent');
+  ctx.fillStyle = beam;
+  ctx.fillRect(-5, -r, 10, r * 2);
+  ctx.globalCompositeOperation = 'source-over';
+
+  // Rotating rune ring
+  const runeChars = ['\u29c6','\u29c7','\u25c7','\u25c6','\u25b3','\u25bd','\u25cb','\u25a1'];
+  const runeAngle = now * 0.35;
+  ctx.font = 'bold 11px monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (let i = 0; i < 8; i++) {
+    const a  = (i / 8) * Math.PI * 2 + runeAngle;
+    const rx = Math.cos(a) * (r - 13);
+    const ry = Math.sin(a) * (r - 13);
+    ctx.globalAlpha = 0.45 + Math.sin(now * 2.2 + i * 0.8) * 0.3;
+    ctx.fillStyle   = '#00ffcc';
+    ctx.fillText(runeChars[i], rx, ry);
+  }
+  ctx.globalAlpha = 1;
+
+  // "DESCEND" label
+  ctx.fillStyle = 'rgba(0,255,180,0.65)';
+  ctx.font = 'bold 12px monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('DESCEND  [E]', 0, r + 16);
+
+  ctx.restore();
 }
 
 // =============================================================================
@@ -1281,7 +1431,7 @@ class Player {
     }
 
     this._handleMovement(dt, input);
-    this._resolveWalls(dungeon);
+    this._resolveWalls(dungeon, game);
   }
 
   _switchWeapon(dir) {
@@ -1379,6 +1529,7 @@ class Player {
       while (diff >  Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
       if (Math.abs(diff) < half) {
+        game.damageDealt += dmg;
         e.takeDamage(dmg, game);
         const [kx, ky] = vecNorm(e.x - this.x, e.y - this.y);
         e.vx += kx * this.weapon.knockback;
@@ -1454,25 +1605,57 @@ class Player {
     this.y += this.vy * dt;
   }
 
-  _resolveWalls(dungeon) {
+  _resolveWalls(dungeon, game) {
     const { map, mapW, mapH } = dungeon;
-    const r = this.radius;
+    const PAD = this.radius + PLAYER_PADDING;
 
-    const check = (cx, cy) => {
-      const tx = (cx / TILE) | 0;
-      const ty = (cy / TILE) | 0;
-      if (tx < 0 || ty < 0 || tx >= mapW || ty >= mapH) return true;
-      const t = map[ty * mapW + tx];
-      return t === TILE_WALL || t === TILE_VOID;
-    };
+    const tx0 = Math.max(0, Math.floor((this.x - PAD) / TILE));
+    const tx1 = Math.min(mapW - 1, Math.floor((this.x + PAD) / TILE));
+    const ty0 = Math.max(0, Math.floor((this.y - PAD) / TILE));
+    const ty1 = Math.min(mapH - 1, Math.floor((this.y + PAD) / TILE));
 
-    const nx = this.x;
-    if (check(nx + r, this.y) || check(nx - r, this.y)) {
-      this.x = this.px; this.vx = 0;
+    for (let ty = ty0; ty <= ty1; ty++) {
+      for (let tx = tx0; tx <= tx1; tx++) {
+        const t = map[ty * mapW + tx];
+        if (t !== TILE_WALL && t !== TILE_VOID) continue;
+
+        const wx = tx * TILE, wy = ty * TILE;
+        const nearX = clamp(this.x, wx, wx + TILE);
+        const nearY = clamp(this.y, wy, wy + TILE);
+        const dx = this.x - nearX, dy = this.y - nearY;
+        const distSq = dx * dx + dy * dy;
+        if (distSq >= PAD * PAD) continue;
+
+        const dist = Math.sqrt(distSq) || 0.001;
+        const pen  = PAD - dist;
+        const nx   = dx / dist, ny = dy / dist;
+
+        this.x += nx * pen;
+        this.y += ny * pen;
+
+        // Remove velocity component pushing into the wall (allows sliding)
+        const vDotN = this.vx * nx + this.vy * ny;
+        if (vDotN < 0) { this.vx -= vDotN * nx; this.vy -= vDotN * ny; }
+      }
     }
-    const ny = this.y;
-    if (check(this.x, ny + r) || check(this.x, ny - r)) {
-      this.y = this.py; this.vy = 0;
+
+    // Boss arena doors block movement
+    if (game && game.bossArenaLocked) {
+      for (const door of game.bossArenaDoors) {
+        if (door.open) continue;
+        const wx = door.x, wy = door.y;
+        const nearX = clamp(this.x, wx, wx + TILE);
+        const nearY = clamp(this.y, wy, wy + TILE);
+        const dx = this.x - nearX, dy = this.y - nearY;
+        const distSq = dx * dx + dy * dy;
+        if (distSq >= PAD * PAD) continue;
+        const dist = Math.sqrt(distSq) || 0.001;
+        const pen  = PAD - dist;
+        const nx   = dx / dist, ny = dy / dist;
+        this.x += nx * pen; this.y += ny * pen;
+        const vDotN = this.vx * nx + this.vy * ny;
+        if (vDotN < 0) { this.vx -= vDotN * nx; this.vy -= vDotN * ny; }
+      }
     }
   }
 
@@ -1846,15 +2029,40 @@ class Enemy {
 
   _resolveWalls(dungeon) {
     const { map, mapW, mapH } = dungeon;
-    const r = this.radius;
-    const check = (cx, cy) => {
-      const tx = (cx / TILE) | 0, ty = (cy / TILE) | 0;
-      if (tx < 0 || ty < 0 || tx >= mapW || ty >= mapH) return true;
-      const t = map[ty * mapW + tx];
-      return t === TILE_WALL || t === TILE_VOID;
-    };
-    if (check(this.x + r, this.y) || check(this.x - r, this.y)) { this.x = this.px; this.vx *= -0.3; this.patrolAngle += Math.PI * 0.5; }
-    if (check(this.x, this.y + r) || check(this.x, this.y - r)) { this.y = this.py; this.vy *= -0.3; this.patrolAngle += Math.PI * 0.5; }
+    const PAD = this.radius + PLAYER_PADDING;
+
+    const tx0 = Math.max(0, Math.floor((this.x - PAD) / TILE));
+    const tx1 = Math.min(mapW - 1, Math.floor((this.x + PAD) / TILE));
+    const ty0 = Math.max(0, Math.floor((this.y - PAD) / TILE));
+    const ty1 = Math.min(mapH - 1, Math.floor((this.y + PAD) / TILE));
+
+    for (let ty = ty0; ty <= ty1; ty++) {
+      for (let tx = tx0; tx <= tx1; tx++) {
+        const t = map[ty * mapW + tx];
+        if (t !== TILE_WALL && t !== TILE_VOID) continue;
+
+        const wx = tx * TILE, wy = ty * TILE;
+        const nearX = clamp(this.x, wx, wx + TILE);
+        const nearY = clamp(this.y, wy, wy + TILE);
+        const dx = this.x - nearX, dy = this.y - nearY;
+        const distSq = dx * dx + dy * dy;
+        if (distSq >= PAD * PAD) continue;
+
+        const dist = Math.sqrt(distSq) || 0.001;
+        const pen  = PAD - dist;
+        const nx   = dx / dist, ny = dy / dist;
+
+        this.x += nx * pen;
+        this.y += ny * pen;
+
+        const vDotN = this.vx * nx + this.vy * ny;
+        if (vDotN < 0) {
+          this.vx -= vDotN * nx;
+          this.vy -= vDotN * ny;
+          this.patrolAngle += Math.PI * 0.5;
+        }
+      }
+    }
   }
 
   takeDamage(amount, game) {
@@ -2826,7 +3034,7 @@ class Renderer {
         this.bgOC.height = dungeon.mapH * TILE;
         this.bgCtx = this.bgOC.getContext('2d');
       }
-      renderTiles(this.bgCtx, dungeon);
+      renderTiles(this.bgCtx, dungeon, getTheme(game.level));
       this.bgDirty = false;
       this.bgMapW  = dungeon.mapW * TILE;
       this.bgMapH  = dungeon.mapH * TILE;
@@ -2853,16 +3061,17 @@ class Renderer {
       if (item.alive) item.draw(this.worldCtx);
     }
 
-    // Torches (flicker)
+    // Torches (flicker) — theme-coloured
     const now = Date.now() * 0.001;
+    const theme = getTheme(game.level);
     for (const t of dungeon.torches) {
       const f = 0.8 + Math.sin(now * t.flicker * 6 + t.offset) * 0.2;
       this.worldCtx.save();
       this.worldCtx.globalCompositeOperation = 'lighter';
       this.worldCtx.globalAlpha = 0.25 * f;
       const tg = this.worldCtx.createRadialGradient(t.x, t.y, 0, t.x, t.y, t.radius * f);
-      tg.addColorStop(0, '#ffaa44');
-      tg.addColorStop(0.5, '#ff6600');
+      tg.addColorStop(0, theme.torchA);
+      tg.addColorStop(0.5, theme.torchB);
       tg.addColorStop(1, 'transparent');
       this.worldCtx.fillStyle = tg;
       this.worldCtx.beginPath();
@@ -2877,6 +3086,27 @@ class Renderer {
       this.worldCtx.arc(t.x, t.y, 3, 0, Math.PI * 2);
       this.worldCtx.fill();
       this.worldCtx.globalAlpha = 1;
+    }
+
+    // Staircase animated overlay
+    if (dungeon.exitRoom) renderStaircaseAnimated(this.worldCtx, dungeon.exitRoom, now);
+
+    // Boss arena doors
+    if (game.bossArenaLocked) {
+      for (const door of game.bossArenaDoors) {
+        if (door.open) continue;
+        this.worldCtx.fillStyle = '#220000';
+        this.worldCtx.fillRect(door.x, door.y, TILE, TILE);
+        this.worldCtx.strokeStyle = '#ff3300';
+        this.worldCtx.lineWidth   = 3;
+        this.worldCtx.strokeRect(door.x, door.y, TILE, TILE);
+        this.worldCtx.fillStyle = '#ff4400';
+        this.worldCtx.globalAlpha = 0.6 + Math.sin(now * 4) * 0.3;
+        this.worldCtx.font = 'bold 20px monospace';
+        this.worldCtx.textAlign = 'center'; this.worldCtx.textBaseline = 'middle';
+        this.worldCtx.fillText('\u26bf', door.x + TILE / 2, door.y + TILE / 2);
+        this.worldCtx.globalAlpha = 1;
+      }
     }
 
     // Super chest
@@ -2928,7 +3158,7 @@ class Renderer {
     const sc = this.shadowCtx;
 
     sc.clearRect(0, 0, CANVAS_W, CANVAS_H);
-    sc.fillStyle = 'rgba(0,0,15,0.93)';
+    sc.fillStyle = getTheme(game.level).ambient;
     sc.fillRect(0, 0, CANVAS_W, CANVAS_H);
 
     sc.globalCompositeOperation = 'destination-out';
@@ -2937,9 +3167,10 @@ class Renderer {
     const mw = game.camera.toWorld(game.input.mouse.x, game.input.mouse.y);
     const mouseAngle = Math.atan2(mw.y - player.y, mw.x - player.x);
 
-    // Player ambient circle (flicker)
+    // Player ambient circle (flicker) — shrink in DARK rooms
     const flick = 0.92 + Math.sin(now * 11.3) * 0.08;
-    const ambR  = 195 * flick;
+    const inDark = game._getCurrentRoom && game._getCurrentRoom() && game._getCurrentRoom().type === ROOM_DARK;
+    const ambR  = (inDark ? 90 : 195) * flick;
     const ag = sc.createRadialGradient(ps.x, ps.y, 0, ps.x, ps.y, ambR);
     ag.addColorStop(0,   'rgba(0,0,0,1)');
     ag.addColorStop(0.55,'rgba(0,0,0,0.75)');
@@ -3084,10 +3315,73 @@ class Renderer {
 // =============================================================================
 // 17. UI RENDERER
 // =============================================================================
+function renderTutorial(ctx, alpha) {
+  const pw = 560, ph = 320;
+  const px = CANVAS_W / 2 - pw / 2;
+  const py = CANVAS_H / 2 - ph / 2;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  // Background panel
+  ctx.fillStyle = 'rgba(4,6,18,0.94)';
+  roundRect(ctx, px, py, pw, ph, 12); ctx.fill();
+  ctx.strokeStyle = 'rgba(0,255,200,0.55)';
+  ctx.lineWidth = 2;
+  roundRect(ctx, px, py, pw, ph, 12); ctx.stroke();
+
+  // Title
+  ctx.fillStyle = '#00ffcc';
+  ctx.font = 'bold 22px monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('DUNGEON EXPLORER: INFINITE DESCENT', CANVAS_W / 2, py + 32);
+
+  // Separator
+  ctx.strokeStyle = 'rgba(0,255,200,0.3)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(px + 20, py + 52); ctx.lineTo(px + pw - 20, py + 52);
+  ctx.stroke();
+
+  // Controls grid — two columns
+  ctx.font = '13px monospace';
+  ctx.textAlign = 'left';
+  const left  = px + 40;
+  const right = px + pw / 2 + 20;
+  const top   = py + 72;
+  const lineH = 28;
+  const controls = [
+    ['WASD / ARROWS', 'Move',         'LEFT CLICK',  'Fire / Melee'],
+    ['MOUSE',         'Aim',          'Q / 1-4',     'Switch Weapon'],
+    ['SPACE / SHIFT', 'Dash',         'F',           'Use Potion'],
+    ['E',             'Interact',     'SCROLL',      'Weapon Cycle'],
+  ];
+
+  controls.forEach(([k1, v1, k2, v2], i) => {
+    const y = top + i * lineH;
+    ctx.fillStyle = '#00ffcc'; ctx.fillText(k1, left, y);
+    ctx.fillStyle = '#aaaaaa'; ctx.fillText('— ' + v1, left + 140, y);
+    ctx.fillStyle = '#00ffcc'; ctx.fillText(k2, right, y);
+    ctx.fillStyle = '#aaaaaa'; ctx.fillText('— ' + v2, right + 100, y);
+  });
+
+  // Fade prompt
+  ctx.fillStyle = 'rgba(255,255,255,0.45)';
+  ctx.font = '12px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('Move to begin  ·  Fades automatically', CANVAS_W / 2, py + ph - 22);
+
+  ctx.restore();
+}
+
+// =============================================================================
 function renderUI(ctx, game, now) {
   const p = game.player;
 
-  if (game.state === 'PLAYING') {
+  if (game.state === 'PLAYING' || game.state === 'FLOOR_SKIP_CONFIRM') {
+    // Tutorial overlay
+    if (game.tutorialAlpha > 0) renderTutorial(ctx, game.tutorialAlpha);
+
     // --- TOP LEFT: HP / Armor / Stamina ---
     const bx = 18, by = 18, bw = 160, bh = 12, gap = 6;
 
@@ -3251,6 +3545,26 @@ function renderUI(ctx, game, now) {
     ctx.fillText('ENEMIES: ' + living, CANVAS_W - 18, 50);
     ctx.fillText('KILLS:   ' + game.kills, CANVAS_W - 18, 68);
 
+    // Theme name
+    ctx.fillStyle    = 'rgba(180,180,180,0.55)';
+    ctx.font         = '11px monospace';
+    ctx.textAlign    = 'right';
+    ctx.textBaseline = 'top';
+    ctx.fillText(getTheme(game.level).name, CANVAS_W - 18, 88);
+
+    // Timed challenge HUD
+    const cr = game._getCurrentRoom ? game._getCurrentRoom() : null;
+    if (cr && cr.type === ROOM_TIMED && cr.timedChallenge && cr.timedChallenge.started && !cr.timedChallenge.complete) {
+      const secs = Math.ceil(cr.timedChallenge.duration);
+      const pulse4 = 0.7 + Math.sin(now * 5) * 0.3;
+      ctx.globalAlpha = pulse4;
+      ctx.fillStyle   = '#ffcc00';
+      ctx.font        = 'bold 20px monospace';
+      ctx.textAlign   = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('SURVIVE: ' + secs + 's', CANVAS_W / 2, 32);
+      ctx.globalAlpha = 1;
+    }
+
     // Combo indicator
     if (p.combo >= 2 && p.comboTimer > 0) {
       const ct = Math.min(1, p.comboTimer / 0.5);
@@ -3274,6 +3588,17 @@ function renderUI(ctx, game, now) {
       ctx.globalAlpha = 1;
     }
 
+    // Floor skip prompt (enemies alive, player in exit room)
+    if (game.enemies.some(e => e.alive) && game._playerInExitRoom && game._playerInExitRoom()) {
+      const pulse5 = 0.6 + Math.sin(now * 4) * 0.4;
+      ctx.globalAlpha = pulse5;
+      ctx.fillStyle = '#ff8800';
+      ctx.font = 'bold 16px monospace';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('[E]  Leave early?  (Forfeit chest)', CANVAS_W / 2, CANVAS_H - 70);
+      ctx.globalAlpha = 1;
+    }
+
     // Super chest prompt (all enemies dead, chest not opened)
     if (game.superChest && !game.superChest.opened && game.enemies.every(e => !e.alive)) {
       const pulse3 = 0.6 + Math.sin(now * 4) * 0.4;
@@ -3283,6 +3608,26 @@ function renderUI(ctx, game, now) {
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText('ALL CLEAR  —  Find the SUPER CHEST  [E]', CANVAS_W / 2, CANVAS_H - 90);
       ctx.globalAlpha = 1;
+    }
+
+    // Floor-skip confirmation dialog
+    if (game.state === 'FLOOR_SKIP_CONFIRM') {
+      const dw = 560, dh = 160;
+      const dx = CANVAS_W / 2 - dw / 2, dy = CANVAS_H / 2 - dh / 2;
+      ctx.fillStyle = 'rgba(0,0,0,0.80)';
+      roundRect(ctx, dx, dy, dw, dh, 12); ctx.fill();
+      ctx.strokeStyle = '#ff5500'; ctx.lineWidth = 2.5;
+      roundRect(ctx, dx, dy, dw, dh, 12); ctx.stroke();
+      ctx.fillStyle = '#ff8800';
+      ctx.font = 'bold 22px monospace';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('LEAVE EARLY?  Forfeit Super Chest.', CANVAS_W / 2, dy + 52);
+      ctx.fillStyle = '#cccccc';
+      ctx.font = '15px monospace';
+      ctx.fillText('[L]  Leave Floor          [S]  Stay & Fight', CANVAS_W / 2, dy + 96);
+      ctx.fillStyle = 'rgba(180,180,180,0.5)';
+      ctx.font = '11px monospace';
+      ctx.fillText('Leaving early gives reduced XP and no chest', CANVAS_W / 2, dy + 132);
     }
 
     // Level-up banner
@@ -3384,6 +3729,34 @@ function renderUI(ctx, game, now) {
         CANVAS_W / 2, CANVAS_H * 0.88);
     }
 
+  } else if (game.state === 'LEVEL_TRANSITION') {
+    // Cinematic floor transition
+    const lt = game.levelTransition;
+    const durations = { fade_out: 0.8, title: 0.9, fade_in: 0.6 };
+    const t = lt.timer / durations[lt.phase];
+    let fadeAlpha = 0;
+    if (lt.phase === 'fade_out') fadeAlpha = t;
+    else if (lt.phase === 'title') fadeAlpha = 1;
+    else fadeAlpha = 1 - t;
+
+    ctx.fillStyle = `rgba(0,0,0,${Math.min(1, fadeAlpha)})`;
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+    if (lt.phase === 'title' || (lt.phase === 'fade_in' && lt.timer < 0.25)) {
+      const textAlpha = lt.phase === 'title'
+        ? Math.min(1, lt.timer * 3)
+        : Math.max(0, 1 - lt.timer * 4);
+      ctx.globalAlpha = textAlpha;
+      ctx.fillStyle = '#00ffcc';
+      ctx.font = 'bold 58px monospace';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('FLOOR  ' + game.level, CANVAS_W / 2, CANVAS_H / 2 - 20);
+      ctx.fillStyle = '#888888';
+      ctx.font = '20px monospace';
+      ctx.fillText(getTheme(game.level).name, CANVAS_W / 2, CANVAS_H / 2 + 38);
+      ctx.globalAlpha = 1;
+    }
+
   } else if (game.state === 'GAME_OVER') {
     // Game over screen
     ctx.fillStyle = 'rgba(0,0,0,0.88)';
@@ -3414,6 +3787,7 @@ function renderUI(ctx, game, now) {
     const stats = [
       ['LEVEL REACHED', game.level],
       ['TOTAL KILLS',   game.kills],
+      ['DAMAGE DEALT',  Math.floor(game.damageDealt)],
       ['TIME SURVIVED', minutes + ':' + String(seconds).padStart(2, '0')],
     ];
 
@@ -3421,11 +3795,11 @@ function renderUI(ctx, game, now) {
     ctx.textAlign = 'center';
     stats.forEach(([label, val], i) => {
       ctx.fillStyle = statColor;
-      ctx.fillText(label + ':  ' + val, CANVAS_W / 2, CANVAS_H / 2 - 40 + i * 36);
+      ctx.fillText(label + ':  ' + val, CANVAS_W / 2, CANVAS_H / 2 - 52 + i * 34);
     });
 
-    // Restart button
-    const bw2 = 220, bh2 = 52, bx2 = CANVAS_W / 2 - bw2 / 2, by2 = CANVAS_H / 2 + 90;
+    // Restart button (shifted down to accommodate extra stat)
+    const bw2 = 220, bh2 = 52, bx2 = CANVAS_W / 2 - bw2 / 2, by2 = CANVAS_H / 2 + 110;
     const pulse2 = 0.7 + Math.sin(now * 3) * 0.3;
     ctx.strokeStyle = `rgba(0,255,136,${pulse2})`;
     ctx.lineWidth   = 2.5;
@@ -3497,6 +3871,21 @@ class Game {
     this._superChestSpawned = false;
     this.bossEnemy  = null;
 
+    // Tutorial
+    this.tutorialVisible = !localStorage.getItem('hasSeenTutorial');
+    this.tutorialAlpha   = this.tutorialVisible ? 1 : 0;
+    this.tutorialTimer   = 8.0;
+
+    // Damage tracking
+    this.damageDealt = 0;
+
+    // Boss arena
+    this.bossArenaLocked = false;
+    this.bossArenaDoors  = [];
+
+    // Floor skip / level transition
+    this.levelTransition = { active: false, timer: 0, phase: 'fade_out', withChest: false };
+
     this._restartBtn = null;
     this.lastTime    = performance.now();
 
@@ -3530,6 +3919,8 @@ class Game {
 
     // Spawn enemies — with boss evolution at multiples of 10
     this.enemies = [];
+    this.bossArenaLocked = false;
+    this.bossArenaDoors  = [];
     let bossSpawned = false;
     for (const room of this.dungeon.rooms) {
       if (room.type === ROOM_SPAWN) continue;
@@ -3548,8 +3939,35 @@ class Game {
           enemy.telegraphRadius = 130 + tier * 22;
           this.bossEnemy = enemy;
         }
+        // Force-elite rooms
+        if (room.forceElite && !enemy.isElite) {
+          enemy.isElite = true;
+          enemy.hp    *= 2; enemy.maxHp *= 2;
+          enemy.damage *= 1.3;
+          enemy.radius *= 1.12;
+          const mods = ['SHIELDED_E','EXPLOSIVE_E','FRENZIED','REGEN','PHASE','REFLECTIVE'];
+          enemy.eliteMods = [mods[Math.floor(Math.random() * mods.length)]];
+          if (enemy.eliteMods.includes('FRENZIED')) enemy.speed *= 1.4;
+          if (enemy.eliteMods.includes('SHIELDED_E')) enemy.eliteShield = 3;
+        }
         this.enemies.push(enemy);
       }
+    }
+
+    // Treasure rooms — place guaranteed items
+    for (const room of this.dungeon.rooms) {
+      if (room.type !== ROOM_TREASURE) continue;
+      const cx = room.cx * TILE + TILE / 2;
+      const cy = room.cy * TILE + TILE / 2;
+      this.dungeon.items.push(new Item('POTION', cx - 32, cy));
+      this.dungeon.items.push(new Item('ARMOR',  cx + 32, cy));
+      this.dungeon.items.push(new Item('POTION', cx, cy - 32));
+    }
+
+    // Boss arena — lock doors on boss floors
+    if (this.bossEnemy) {
+      this.bossArenaLocked = true;
+      this.bossArenaDoors  = this._findBossRoomDoors(this.dungeon);
     }
 
     this.explosions = [];
@@ -3587,24 +4005,132 @@ class Game {
   _checkLevelComplete(ePress = false) {
     if (this.state !== 'PLAYING') return;
     const allDead = this.enemies.every(e => !e.alive);
-    if (!allDead) return;
 
-    // Spawn Super Chest once at exit room center
-    if (!this._superChestSpawned) {
-      this._superChestSpawned = true;
-      const exit = this.dungeon.exitRoom;
-      if (exit) {
-        const ex = exit.cx * TILE + TILE / 2;
-        const ey = exit.cy * TILE + TILE / 2;
-        this.superChest = new SuperChest(ex, ey);
-        this.levelFlashTimer = 0.8;
+    if (allDead) {
+      // Spawn Super Chest once at exit room center
+      if (!this._superChestSpawned) {
+        this._superChestSpawned = true;
+        const exit = this.dungeon.exitRoom;
+        if (exit) {
+          const ex = exit.cx * TILE + TILE / 2;
+          const ey = exit.cy * TILE + TILE / 2;
+          this.superChest = new SuperChest(ex, ey);
+          this.levelFlashTimer = 0.8;
+        }
+      }
+      // Player interacts with Super Chest → CHEST_SELECT
+      if (this.superChest && !this.superChest.opened && ePress) {
+        if (this.superChest.tryOpen(this.player, this)) {
+          this.state = 'CHEST_SELECT';
+        }
+      }
+      return;
+    }
+
+    // Enemies still alive — allow floor skip if player is in exit room
+    if (ePress && this._playerInExitRoom()) {
+      this.state = 'FLOOR_SKIP_CONFIRM';
+    }
+  }
+
+  _playerInExitRoom() {
+    const exit = this.dungeon.exitRoom;
+    if (!exit) return false;
+    const tx = (this.player.x / TILE) | 0;
+    const ty = (this.player.y / TILE) | 0;
+    return tx >= exit.x && tx < exit.x + exit.w &&
+           ty >= exit.y && ty < exit.y + exit.h;
+  }
+
+  _getCurrentRoom() {
+    if (!this.dungeon) return null;
+    const tx = (this.player.x / TILE) | 0;
+    const ty = (this.player.y / TILE) | 0;
+    return this.dungeon.rooms.find(r =>
+      tx >= r.x && tx < r.x + r.w &&
+      ty >= r.y && ty < r.y + r.h
+    ) || null;
+  }
+
+  _findBossRoomDoors(dungeon) {
+    const boss = dungeon.rooms.find(r => r.type === ROOM_BOSS);
+    if (!boss) return [];
+    const { map, mapW } = dungeon;
+    const doors = [];
+    for (let y = boss.y - 1; y <= boss.y + boss.h; y++) {
+      for (let x = boss.x - 1; x <= boss.x + boss.w; x++) {
+        // Skip interior
+        if (x >= boss.x && x < boss.x + boss.w && y >= boss.y && y < boss.y + boss.h) continue;
+        if (x < 0 || y < 0 || x >= mapW) continue;
+        const t = map[y * mapW + x];
+        if (t === TILE_CORR) {
+          doors.push({ x: x * TILE, y: y * TILE, open: false });
+          if (doors.length >= 4) return doors;
+        }
+      }
+    }
+    return doors;
+  }
+
+  _startLevelTransition(withChest) {
+    this.levelTransition.active    = true;
+    this.levelTransition.timer     = 0;
+    this.levelTransition.phase     = 'fade_out';
+    this.levelTransition.withChest = withChest;
+    this.state = 'LEVEL_TRANSITION';
+  }
+
+  _updateLevelTransition(dt) {
+    const lt = this.levelTransition;
+    lt.timer += dt;
+    const durations = { fade_out: 0.8, title: 0.9, fade_in: 0.6 };
+    if (lt.timer >= durations[lt.phase]) {
+      lt.timer = 0;
+      if (lt.phase === 'fade_out') {
+        this.level++;
+        this._generateLevel(false);
+        lt.phase = 'title';
+      } else if (lt.phase === 'title') {
+        lt.phase = 'fade_in';
+      } else {
+        lt.active = false;
+        this.state = lt.withChest ? 'CHEST_SELECT' : 'PLAYING';
+      }
+    }
+  }
+
+  _resolveRoomEffects(dt) {
+    const room = this._getCurrentRoom();
+    if (!room) return;
+
+    // Trap room: periodic spike damage
+    if (room.type === ROOM_TRAP) {
+      if (room.trapCd === undefined) room.trapCd = 1.5;
+      room.trapCd -= dt;
+      if (room.trapCd <= 0) {
+        this.player.takeDamage(8, this);
+        this.particles.burst(this.player.x, this.player.y, 8,
+          { color: '#ff4400', type: 'spark', speed: 60, life: 0.3 });
+        room.trapCd = 1.5;
       }
     }
 
-    // Player interacts with Super Chest → CHEST_SELECT
-    if (this.superChest && !this.superChest.opened && ePress) {
-      if (this.superChest.tryOpen(this.player, this)) {
-        this.state = 'CHEST_SELECT';
+    // Timed room: count down survival timer
+    if (room.type === ROOM_TIMED && room.timedChallenge) {
+      const tc = room.timedChallenge;
+      if (!tc.started) tc.started = true;
+      if (!tc.complete) {
+        tc.duration -= dt;
+        if (tc.duration <= 0) {
+          tc.complete = true;
+          // Bonus: spawn a potion and armor item at room center
+          const ix = room.cx * TILE + TILE / 2;
+          const iy = room.cy * TILE + TILE / 2;
+          this.dungeon.items.push(new Item('POTION', ix - 24, iy));
+          this.dungeon.items.push(new Item('ARMOR',  ix + 24, iy));
+          this.camera.shake(4, 0.3);
+          this.floatingTexts.push(new FloatingText(ix, iy - 40, 'SURVIVED!', '#ffcc44'));
+        }
       }
     }
   }
@@ -3674,6 +4200,12 @@ class Game {
     this.superChest = null;
     this._superChestSpawned = false;
     this.bossEnemy  = null;
+    this.damageDealt = 0;
+    this.bossArenaLocked = false;
+    this.bossArenaDoors  = [];
+    this.levelTransition = { active: false, timer: 0, phase: 'fade_out', withChest: false };
+    this.tutorialVisible = false;  // don't show tutorial on restart
+    this.tutorialAlpha   = 0;
     this.state = 'PLAYING';
     this._generateLevel(true);
   }
@@ -3681,7 +4213,26 @@ class Game {
   update(dt) {
     if (this.state === 'GAME_OVER') return;
 
-    // CHEST_SELECT: freeze game, handle perk choice
+    // LEVEL_TRANSITION: cinematic fade between floors
+    if (this.state === 'LEVEL_TRANSITION') {
+      this._updateLevelTransition(dt);
+      this.input.flush();
+      return;
+    }
+
+    // FLOOR_SKIP_CONFIRM: waiting for leave/stay decision
+    if (this.state === 'FLOOR_SKIP_CONFIRM') {
+      if (this.input.justPressed('KeyL')) {
+        this.state = 'PLAYING';
+        this._startLevelTransition(false); // no chest, skip
+      } else if (this.input.justPressed('KeyS') || this.input.justPressed('Escape')) {
+        this.state = 'PLAYING';
+      }
+      this.input.flush();
+      return;
+    }
+
+    // CHEST_SELECT: freeze game, handle perk choice then transition
     if (this.state === 'CHEST_SELECT') {
       const chest = this.superChest;
       if (chest && chest.choices) {
@@ -3689,10 +4240,8 @@ class Game {
           if (this.input.justPressed('Digit' + (i + 1))) {
             this.player.addPerk(chest.choices[i], this);
             this.superChest = null;
-            this.state = 'PLAYING';
-            this.level++;
-            this._generateLevel(false);
             this.input.flush();
+            this._startLevelTransition(false); // cinematic transition
             return;
           }
         }
@@ -3702,6 +4251,19 @@ class Game {
     }
 
     this.survivalTime += dt;
+
+    // Tutorial fade logic
+    if (this.tutorialVisible) {
+      this.tutorialTimer -= dt;
+      const moved = Math.abs(this.player.vx) > 5 || Math.abs(this.player.vy) > 5;
+      if (this.tutorialTimer <= 0 || moved) {
+        this.tutorialVisible = false;
+        localStorage.setItem('hasSeenTutorial', '1');
+      }
+    }
+    if (!this.tutorialVisible && this.tutorialAlpha > 0) {
+      this.tutorialAlpha = Math.max(0, this.tutorialAlpha - dt * 1.5);
+    }
 
     // Hit stop time scale
     const eff = this.hitStopTimer > 0 ? dt * 0.06 : dt;
@@ -3743,6 +4305,7 @@ class Game {
         for (const e of this.enemies) {
           if (!e.alive) continue;
           if (dist2(proj.x, proj.y, e.x, e.y) < proj.radius + e.radius) {
+            this.damageDealt += proj.damage;
             e.takeDamage(proj.damage, this);
             // Lifesteal on hit
             if (this.player.lifesteal > 0) {
@@ -3784,6 +4347,36 @@ class Game {
     for (let i = this.explosions.length - 1; i >= 0; i--) {
       this.explosions[i].timer -= dt;
       if (this.explosions[i].timer <= 0) this.explosions.splice(i, 1);
+    }
+
+    // Room-type effects (traps, timed challenges)
+    this._resolveRoomEffects(dt);
+
+    // Staircase dust particles
+    if (this.dungeon.exitRoom && Math.random() < dt * 3) {
+      const ex = this.dungeon.exitRoom.cx * TILE + TILE / 2;
+      const ey = this.dungeon.exitRoom.cy * TILE + TILE / 2;
+      this.particles.emit(
+        ex + (Math.random() - 0.5) * 40,
+        ey + (Math.random() - 0.5) * 40,
+        (Math.random() - 0.5) * 8, Math.random() * 10 + 4,
+        { color: '#88ccff', type: 'glow', life: 1.4, size: 2, alpha: 0.35 }
+      );
+    }
+
+    // Boss unlock on boss death
+    if (this.bossArenaLocked && this.bossEnemy && !this.bossEnemy.alive) {
+      this.bossArenaLocked = false;
+      this.bossArenaDoors.forEach(d => { d.open = true; });
+      this.camera.shake(10, 0.5);
+      this.floatingTexts.push(new FloatingText(
+        this.bossEnemy.x, this.bossEnemy.y - 50, 'BOSS DEFEATED!', '#ffcc44'));
+      // Boss always drops chest at its position
+      if (!this._superChestSpawned) {
+        this._superChestSpawned = true;
+        this.superChest = new SuperChest(this.bossEnemy.x, this.bossEnemy.y);
+        this.levelFlashTimer = 0.8;
+      }
     }
 
     // Floating texts
